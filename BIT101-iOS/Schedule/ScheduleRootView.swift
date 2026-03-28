@@ -1,0 +1,1367 @@
+//
+//  ScheduleRootView.swift
+//  BIT101-iOS
+//
+//  Created by Codex on 2026-03-24.
+//
+
+import SwiftUI
+
+// MARK: - Schedule Root
+
+/// 统一压缩教室名称里的冗长楼名，提升课表卡片可读性。
+private func normalizeDisplayedClassroom(_ value: String) -> String {
+    value
+        .replacingOccurrences(of: "理教楼", with: "理教")
+        .replacingOccurrences(of: "文萃楼", with: "文萃")
+}
+
+/// 对课程标题做本地展示优化。
+///
+/// 目前主要把 `体育/xx` 压缩成 `xx`。
+private func normalizeDisplayedCourseTitle(_ value: String) -> String {
+    if value.hasPrefix("体育/") {
+        return String(value.dropFirst("体育/".count))
+    }
+    return value
+}
+
+/// 日程页根视图。
+///
+/// 顶部是系统 segmented，正文按当前分区单独渲染。
+/// 这样能避免分页容器影响底部玻璃效果，同时保留轻扫切换体验。
+struct ScheduleRootView: View {
+    @Binding var requestedSection: ScheduleSection?
+    @StateObject private var viewModel = ScheduleViewModel()
+
+    /// 日程主页主体。
+    var body: some View {
+        VStack(spacing: 0) {
+            ScheduleSectionTabs(selectedSection: $viewModel.selectedSection)
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .padding(.bottom, 8)
+
+            ZStack {
+                selectedSectionView
+            }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .contentShape(Rectangle())
+                .simultaneousGesture(sectionSwitchGesture)
+        }
+        .background(Color(.systemGroupedBackground))
+        .toolbar(.hidden, for: .navigationBar)
+        .task {
+            await viewModel.loadIfNeeded()
+        }
+        .onChange(of: viewModel.selectedSection) { _, section in
+            if section == .classroom {
+                Task {
+                    await viewModel.prepareClassroomIfNeeded()
+                }
+            }
+        }
+        .onAppear {
+            consumeRequestedSectionIfNeeded()
+        }
+        .onChange(of: requestedSection) { _, _ in
+            consumeRequestedSectionIfNeeded()
+        }
+        .alert(item: $viewModel.notice) { notice in
+            Alert(
+                title: Text(notice.title),
+                message: Text(notice.message),
+                dismissButton: .default(Text("知道了"))
+            )
+        }
+    }
+
+    /// 根据当前分区切换渲染不同内容页。
+    @ViewBuilder
+    private var selectedSectionView: some View {
+        switch viewModel.selectedSection {
+        case .courses:
+            CourseScheduleTabView(viewModel: viewModel)
+        case .ddl:
+            DDLScheduleTabView(viewModel: viewModel)
+        case .classroom:
+            FreeClassroomTabView(viewModel: viewModel)
+        }
+    }
+
+    /// 轻扫切换课表 / DDL / 空教室的手势。
+    private var sectionSwitchGesture: some Gesture {
+        DragGesture(minimumDistance: 24, coordinateSpace: .local)
+            .onEnded { value in
+                let horizontal = value.translation.width
+                let vertical = value.translation.height
+
+                guard abs(horizontal) > abs(vertical), abs(horizontal) >= 56 else { return }
+
+                if horizontal < 0 {
+                    switchSection(step: 1)
+                } else {
+                    switchSection(step: -1)
+                }
+            }
+    }
+
+    /// 根据方向切换一级分区。
+    private func switchSection(step: Int) {
+        let allSections = ScheduleSection.allCases
+        guard let currentIndex = allSections.firstIndex(of: viewModel.selectedSection) else { return }
+
+        let nextIndex = currentIndex + step
+        guard allSections.indices.contains(nextIndex) else { return }
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            viewModel.selectedSection = allSections[nextIndex]
+        }
+    }
+
+    /// 消费来自 App 壳层的深链跳转请求。
+    private func consumeRequestedSectionIfNeeded() {
+        guard let requestedSection else { return }
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            viewModel.selectedSection = requestedSection
+            if requestedSection == .courses {
+                viewModel.resetToCurrentWeek()
+            }
+        }
+
+        self.requestedSection = nil
+    }
+}
+
+/// 顶部胶囊切换条。
+private struct ScheduleSectionTabs: View {
+    @Binding var selectedSection: ScheduleSection
+
+    /// 日程页顶部原生分段控件。
+    var body: some View {
+        Picker("日程模块", selection: $selectedSection) {
+            ForEach(ScheduleSection.allCases) { section in
+                Text(section.title).tag(section)
+            }
+        }
+        .pickerStyle(.segmented)
+    }
+}
+
+/// 课表分页。
+///
+/// 负责周视图课表、悬浮操作按钮、自定义日程编辑以及跳转到共享设置中心。
+private struct CourseScheduleTabView: View {
+    @ObservedObject var viewModel: ScheduleViewModel
+    @State private var selectedEntry: ScheduleCalendarEntry?
+    @State private var editingCustomScheduleID: String?
+    @State private var customScheduleDraft = CustomScheduleDraft()
+    @State private var isShowingEditSchedule = false
+    @State private var settingsRoute: SettingsRoute?
+
+    /// 课表分区主体。
+    var body: some View {
+        Group {
+            if viewModel.hasCourseData, let firstDay = viewModel.cache.firstDay {
+                GeometryReader { proxy in
+                    ZStack(alignment: .bottomTrailing) {
+                        CourseScheduleCalendarView(
+                            entries: scheduleEntries,
+                            week: viewModel.selectedWeek,
+                            firstDay: firstDay,
+                            timeTable: viewModel.cache.timeTable,
+                            currentWeek: resolvedCurrentWeek(firstDay: firstDay),
+                            showSaturday: viewModel.cache.showSaturday,
+                            showSunday: viewModel.cache.showSunday,
+                            showHighlightToday: viewModel.cache.showHighlightToday,
+                            showDivider: viewModel.cache.showDivider,
+                            showCurrentTime: viewModel.cache.showCurrentTime,
+                            showBorder: viewModel.cache.showBorder,
+                            onSelect: { entry in
+                                selectedEntry = entry
+                            }
+                        )
+                        .padding(.horizontal, 12)
+                        .padding(.top, 8)
+                        .padding(.bottom, 10)
+
+                        VStack(spacing: 10) {
+                            CourseScheduleFAB(systemImage: "chevron.up") {
+                                viewModel.previousWeek()
+                            }
+                            .disabled(viewModel.selectedWeek <= 1)
+
+                            CourseScheduleFAB(systemImage: "chevron.down") {
+                                viewModel.nextWeek()
+                            }
+                            .disabled(viewModel.selectedWeek >= viewModel.maxWeek)
+
+                            CourseScheduleFAB(systemImage: "plus") {
+                                editingCustomScheduleID = nil
+                                customScheduleDraft = viewModel.customScheduleDraft(for: nil)
+                                isShowingEditSchedule = true
+                            }
+
+                            CourseScheduleFAB(systemImage: "gearshape") {
+                                settingsRoute = .calendar
+                            }
+                        }
+                        .padding(.trailing, 10)
+                        .padding(.bottom, 20)
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                }
+            } else {
+                VStack(spacing: 16) {
+                    Text("还没有课表数据")
+                        .font(.headline)
+                    Text("请在校园网环境下，获取课表。")
+                        .foregroundStyle(.secondary)
+                    Button {
+                        Task { await viewModel.syncCourses() }
+                    } label: {
+                        HStack {
+                            if viewModel.isSyncingCourses {
+                                ProgressView()
+                            }
+                            Text("获取课程表")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(viewModel.isSyncingCourses)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .sheet(item: $selectedEntry) { entry in
+            ScheduleEntryDetailSheet(
+                entry: entry,
+                timeTable: viewModel.cache.timeTable,
+                onEditCustomSchedule: {
+                    if let schedule = viewModel.cache.customSchedules.first(where: { $0.id == entry.sourceID }) {
+                        editingCustomScheduleID = schedule.id
+                        customScheduleDraft = viewModel.customScheduleDraft(for: schedule)
+                        isShowingEditSchedule = true
+                    }
+                },
+                onDeleteCustomSchedule: {
+                    viewModel.deleteCustomSchedule(id: entry.sourceID)
+                    selectedEntry = nil
+                }
+            )
+        }
+        .sheet(isPresented: $isShowingEditSchedule) {
+            AddEditCustomScheduleSheet(
+                draft: $customScheduleDraft,
+                isEditing: editingCustomScheduleID != nil,
+                onSubmit: {
+                    do {
+                        if let editingCustomScheduleID {
+                            try viewModel.updateCustomSchedule(id: editingCustomScheduleID, draft: customScheduleDraft)
+                        } else {
+                            try viewModel.addCustomSchedule(customScheduleDraft)
+                        }
+                        isShowingEditSchedule = false
+                    } catch {
+                        viewModel.notice = ScheduleNotice(title: "保存失败", message: error.localizedDescription)
+                    }
+                },
+                onDismiss: {
+                    isShowingEditSchedule = false
+                }
+            )
+        }
+        .sheet(item: $settingsRoute) { route in
+            NavigationStack {
+                SettingsRootView(initialRoute: route, studentID: "", onLogout: {})
+            }
+        }
+    }
+
+    private var scheduleEntries: [ScheduleCalendarEntry] {
+        guard let firstDay = viewModel.cache.firstDay else {
+            return []
+        }
+
+        // 课表网格只关心当前周，所以先把课程、考试和自定义日程全部压平成同一套日历块模型。
+        let weekStart = Calendar.current.date(byAdding: .day, value: (viewModel.selectedWeek - 1) * 7, to: firstDay) ?? firstDay
+        let weekEnd = Calendar.current.date(byAdding: .day, value: 7, to: weekStart) ?? weekStart
+
+        let courseEntries = viewModel.cache.courses
+            .filter { $0.weeks.contains(viewModel.selectedWeek) }
+            .map {
+                ScheduleCalendarEntry(
+                    id: "course-\($0.id)",
+                    sourceID: $0.id,
+                    dayOfWeek: $0.weekday,
+                    startSection: CGFloat($0.startSection - 1),
+                    endSection: CGFloat($0.endSection),
+                    title: normalizeDisplayedCourseTitle($0.name),
+                    subtitle: normalizeDisplayedClassroom($0.classroom),
+                    detailLines: [
+                        $0.teacher.isEmpty ? nil : "教师：\($0.teacher)",
+                        $0.classroom.isEmpty ? nil : "教室：\(normalizeDisplayedClassroom($0.classroom))",
+                        "节次：\($0.sectionText)",
+                        "时间：\($0.timeText(using: viewModel.cache.timeTable))",
+                        $0.description.isEmpty ? nil : $0.description,
+                    ].compactMap { $0 },
+                    kind: .course
+                )
+            }
+
+        let examEntries = viewModel.cache.showExamInfo ? viewModel.cache.exams.compactMap { exam -> ScheduleCalendarEntry? in
+            guard
+                let examDate = ScheduleDateCodec.parseDate(exam.dateString),
+                examDate >= weekStart,
+                examDate < weekEnd
+            else {
+                return nil
+            }
+
+            let weekday = ScheduleDateCodec.weekdayIndex(from: examDate)
+            let startSection = convertTimeToSection(timeText: exam.beginTime, timeTable: viewModel.cache.timeTable)
+            let endSection = convertTimeToSection(timeText: exam.endTime, timeTable: viewModel.cache.timeTable)
+
+            guard endSection > startSection + 0.05 else {
+                return nil
+            }
+
+            return ScheduleCalendarEntry(
+                id: "exam-\(exam.id)",
+                sourceID: exam.id,
+                dayOfWeek: weekday,
+                startSection: startSection,
+                endSection: endSection,
+                title: "(考试)\n\(exam.name)",
+                subtitle: normalizeDisplayedClassroom(exam.classroom),
+                detailLines: [
+                    exam.teacher.isEmpty ? nil : "教师：\(exam.teacher)",
+                    exam.classroom.isEmpty ? nil : "教室：\(normalizeDisplayedClassroom(exam.classroom))",
+                    exam.examMode.isEmpty ? nil : "形式：\(exam.examMode)",
+                    (exam.beginTime.isEmpty || exam.endTime.isEmpty) ? nil : "时间：\(exam.beginTime)-\(exam.endTime)",
+                    exam.seatID.isEmpty ? nil : "座位号：\(exam.seatID)",
+                ].compactMap { $0 },
+                kind: .exam
+            )
+        } : []
+
+        let customEntries = viewModel.cache.customSchedules.compactMap { schedule -> ScheduleCalendarEntry? in
+            guard
+                let date = ScheduleDateCodec.parseDate(schedule.dateString),
+                date >= weekStart,
+                date < weekEnd
+            else {
+                return nil
+            }
+
+            let weekday = ScheduleDateCodec.weekdayIndex(from: date)
+            let startSection = convertTimeToSection(timeText: schedule.beginTime, timeTable: viewModel.cache.timeTable)
+            let endSection = convertTimeToSection(timeText: schedule.endTime, timeTable: viewModel.cache.timeTable)
+            guard endSection > startSection + 0.05 else {
+                return nil
+            }
+
+            return ScheduleCalendarEntry(
+                id: "custom-\(schedule.id)",
+                sourceID: schedule.id,
+                dayOfWeek: weekday,
+                startSection: startSection,
+                endSection: endSection,
+                title: schedule.title,
+                subtitle: schedule.subtitle,
+                detailLines: [
+                    schedule.subtitle.isEmpty ? nil : "副标题：\(schedule.subtitle)",
+                    schedule.description.isEmpty ? nil : "描述：\(schedule.description)",
+                    "日期：\(schedule.dateString)",
+                    "时间：\(schedule.beginTime)-\(schedule.endTime)",
+                ].compactMap { $0 },
+                kind: .custom
+            )
+        }
+
+        return normalize(entries: courseEntries + examEntries + customEntries)
+    }
+}
+
+/// 周课表大网格。
+private struct CourseScheduleCalendarView: View {
+    private static let monthDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+        formatter.dateFormat = "MM/dd"
+        return formatter
+    }()
+
+    let entries: [ScheduleCalendarEntry]
+    let week: Int
+    let firstDay: Date
+    let timeTable: [TimeSlot]
+    let currentWeek: Int
+    let showSaturday: Bool
+    let showSunday: Bool
+    let showHighlightToday: Bool
+    let showDivider: Bool
+    let showCurrentTime: Bool
+    let showBorder: Bool
+    let onSelect: (ScheduleCalendarEntry) -> Void
+
+    var body: some View {
+        GeometryReader { proxy in
+            let leftWidth: CGFloat = 50
+            let headerHeight: CGFloat = 42
+            let usableHeight = max(proxy.size.height - headerHeight, 1)
+            let rowHeight = usableHeight / CGFloat(max(timeTable.count, 1))
+            let visibleWeekdays = (1 ... 7).filter {
+                if $0 == 6 { return showSaturday }
+                if $0 == 7 { return showSunday }
+                return true
+            }
+            let dayWidth = max((proxy.size.width - leftWidth) / CGFloat(max(visibleWeekdays.count, 1)), 1)
+            let weekDates = visibleWeekdays.compactMap {
+                Calendar.current.date(byAdding: .day, value: ($0 - 1) + (week - 1) * 7, to: firstDay)
+            }
+            let highlightWeekday = (currentWeek == week && showHighlightToday) ? ScheduleDateCodec.weekdayIndex(from: Date()) : nil
+            let timeLineSection = (currentWeek == week && showCurrentTime) ? convertTimeToSection(timeText: currentTimeText(), timeTable: timeTable) : nil
+
+            ZStack(alignment: .topLeading) {
+                if let highlightWeekday, visibleWeekdays.contains(highlightWeekday), let index = visibleWeekdays.firstIndex(of: highlightWeekday) {
+                    Rectangle()
+                        .fill(Color.accentColor.opacity(0.10))
+                        .frame(width: dayWidth, height: usableHeight)
+                        .offset(x: leftWidth + dayWidth * CGFloat(index), y: headerHeight)
+                }
+
+                VStack(spacing: 0) {
+                    HStack(spacing: 0) {
+                        VStack(spacing: 1) {
+                            Text("\(week)")
+                            Text("周")
+                        }
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: leftWidth, height: headerHeight)
+                        .background(Color(.secondarySystemBackground))
+
+                        ForEach(Array(weekDates.enumerated()), id: \.offset) { index, date in
+                            VStack(spacing: 2) {
+                                Text("周\(visibleWeekdays[index])")
+                                Text(mmddText(for: date))
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(.primary)
+                            .frame(width: dayWidth, height: headerHeight)
+                            .background(Color(.secondarySystemBackground))
+                        }
+                    }
+
+                    ForEach(Array(timeTable.enumerated()), id: \.offset) { index, slot in
+                        HStack(spacing: 0) {
+                            VStack(spacing: 1) {
+                                Text("\(index + 1)")
+                                    .font(.caption2.weight(.bold))
+                                Text(slot.start)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(width: leftWidth, height: rowHeight)
+
+                            ForEach(visibleWeekdays, id: \.self) { _ in
+                                Rectangle()
+                                    .fill(Color.clear)
+                                    .frame(width: dayWidth, height: rowHeight)
+                            }
+                        }
+                    }
+                }
+
+                if showDivider {
+                    ForEach(0 ... timeTable.count, id: \.self) { row in
+                        Rectangle()
+                            .fill(Color.secondary.opacity(row == 0 ? 0.18 : 0.12))
+                            .frame(height: 0.5)
+                            .offset(y: headerHeight + rowHeight * CGFloat(row))
+                    }
+                }
+
+                ForEach(0 ... visibleWeekdays.count, id: \.self) { column in
+                    Rectangle()
+                        .fill(Color.secondary.opacity(column == 0 ? 0.18 : 0.12))
+                        .frame(width: 0.5, height: proxy.size.height)
+                        .offset(x: leftWidth + dayWidth * CGFloat(column))
+                }
+
+                if let timeLineSection,
+                   timeLineSection > 0,
+                   timeLineSection < CGFloat(timeTable.count),
+                   let highlightWeekday,
+                   visibleWeekdays.contains(highlightWeekday),
+                   let index = visibleWeekdays.firstIndex(of: highlightWeekday) {
+                    Rectangle()
+                        .fill(Color.accentColor)
+                        .frame(width: dayWidth, height: 1.5)
+                        .offset(
+                            x: leftWidth + dayWidth * CGFloat(index),
+                            y: headerHeight + rowHeight * timeLineSection
+                        )
+                }
+
+                ForEach(entries.filter { visibleWeekdays.contains($0.dayOfWeek) }) { entry in
+                    Button {
+                        onSelect(entry)
+                    } label: {
+                        CourseScheduleBlockView(entry: entry, showBorder: showBorder)
+                    }
+                    .buttonStyle(.plain)
+                    .frame(
+                        width: max(dayWidth - 4, 1),
+                        height: max(rowHeight * (entry.endSection - entry.startSection) - 4, 1)
+                    )
+                    .offset(
+                        x: leftWidth + dayWidth * CGFloat(visibleWeekdays.firstIndex(of: entry.dayOfWeek) ?? 0) + 2,
+                        y: headerHeight + rowHeight * entry.startSection + 2
+                    )
+                }
+            }
+            .clipped()
+            .background(Color(.systemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+    }
+
+    private func mmddText(for date: Date) -> String {
+        Self.monthDayFormatter.string(from: date)
+    }
+
+    private func currentTimeText() -> String {
+        let components = Calendar.current.dateComponents([.hour, .minute], from: Date())
+        return String(format: "%02d:%02d", components.hour ?? 0, components.minute ?? 0)
+    }
+}
+
+/// 课表中的单个课程 / 考试 / 自定义日程块。
+private struct CourseScheduleBlockView: View {
+    let entry: ScheduleCalendarEntry
+    let showBorder: Bool
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Spacer(minLength: 0)
+
+            Text(entry.title)
+                .font(.caption2)
+                .multilineTextAlignment(.center)
+                .lineLimit(4)
+                .minimumScaleFactor(0.75)
+                .foregroundStyle(textColor)
+
+            Spacer(minLength: 0)
+
+            Text(entry.subtitle)
+                .font(.caption2)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.75)
+                .foregroundStyle(textColor)
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(backgroundColor, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            if showBorder {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(borderColor, lineWidth: 0.8)
+            }
+        }
+    }
+
+    private var backgroundColor: Color {
+        switch entry.kind {
+        case .course:
+            return Color(uiColor: .secondarySystemFill).opacity(0.95)
+        case .exam:
+            return Color.orange.opacity(0.22)
+        case .custom:
+            return Color.blue.opacity(0.18)
+        }
+    }
+
+    private var borderColor: Color {
+        switch entry.kind {
+        case .course:
+            return Color.secondary.opacity(0.25)
+        case .exam:
+            return Color.orange.opacity(0.35)
+        case .custom:
+            return Color.blue.opacity(0.30)
+        }
+    }
+
+    private var textColor: Color {
+        switch entry.kind {
+        case .course:
+            return .primary
+        case .exam:
+            return .orange
+        case .custom:
+            return .blue
+        }
+    }
+}
+
+/// 右下角悬浮按钮。
+private struct CourseScheduleFAB: View {
+    let systemImage: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 42, height: 42)
+                .background(.ultraThinMaterial, in: Circle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// 课表网格内部统一使用的条目类型。
+private enum ScheduleCalendarKind {
+    case course
+    case exam
+    case custom
+}
+
+/// 供课表网格渲染的统一条目模型。
+private struct ScheduleCalendarEntry: Identifiable {
+    let id: String
+    let sourceID: String
+    let dayOfWeek: Int
+    let startSection: CGFloat
+    let endSection: CGFloat
+    let title: String
+    let subtitle: String
+    let detailLines: [String]
+    let kind: ScheduleCalendarKind
+}
+
+/// 课表条目详情。
+private struct ScheduleEntryDetailSheet: View {
+    let entry: ScheduleCalendarEntry
+    let timeTable: [TimeSlot]
+    let onEditCustomSchedule: () -> Void
+    let onDeleteCustomSchedule: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text(entry.title)
+                        .font(.headline)
+                    if !entry.subtitle.isEmpty {
+                        Text(entry.subtitle)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if !entry.detailLines.isEmpty {
+                    Section("详情") {
+                        ForEach(entry.detailLines, id: \.self) { line in
+                            Text(line)
+                        }
+                    }
+                }
+
+                if entry.kind == .custom {
+                    Section {
+                        Button("编辑") {
+                            dismiss()
+                            onEditCustomSchedule()
+                        }
+                        Button("删除", role: .destructive) {
+                            onDeleteCustomSchedule()
+                        }
+                    }
+                }
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private var title: String {
+        switch entry.kind {
+        case .course: return "课程详情"
+        case .exam: return "考试详情"
+        case .custom: return "自定义日程"
+        }
+    }
+}
+
+/// 新增 / 编辑自定义日程弹层。
+private struct AddEditCustomScheduleSheet: View {
+    @Binding var draft: CustomScheduleDraft
+    let isEditing: Bool
+    let onSubmit: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("内容") {
+                    TextField("标题", text: $draft.title)
+                    TextField("副标题（通常为地点）", text: $draft.subtitle)
+                    TextField("描述（详情页显示）", text: $draft.description, axis: .vertical)
+                        .lineLimit(3, reservesSpace: true)
+                }
+
+                Section("时间") {
+                    DatePicker("日期", selection: $draft.date, displayedComponents: .date)
+                    DatePicker("开始时间", selection: $draft.beginTime, displayedComponents: .hourAndMinute)
+                    DatePicker("结束时间", selection: $draft.endTime, displayedComponents: .hourAndMinute)
+                }
+
+                Section {
+                    Text("请不要把时间设在课间或极短时段，和其它日程冲突时会发生覆盖。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle(isEditing ? "修改自定义日程" : "添加自定义日程")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消", action: onDismiss)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("确定", action: onSubmit)
+                }
+            }
+        }
+    }
+}
+
+/// 时间表编辑器。
+struct TimeTableEditorSheet: View {
+    @Binding var text: String
+    let onSubmit: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("每行格式：开始时间, 结束时间")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                TextEditor(text: $text)
+                    .font(.system(.body, design: .monospaced))
+                    .padding(10)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                Spacer()
+            }
+            .padding(16)
+            .navigationTitle("设置时间表")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("确定", action: onSubmit)
+                }
+            }
+        }
+    }
+}
+
+/// 自定义日程列表页。
+struct CustomScheduleListSheet: View {
+    @ObservedObject var viewModel: ScheduleViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedRecord: CustomScheduleRecord?
+    @State private var editingRecordID: String?
+    @State private var draft = CustomScheduleDraft()
+    @State private var isShowingEditor = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if viewModel.cache.customSchedules.isEmpty {
+                    ContentUnavailableView(
+                        "还没有自定义日程",
+                        systemImage: "calendar.badge.plus",
+                        description: Text("点击右上角的加号可以先新增一个。")
+                    )
+                    .frame(maxWidth: .infinity)
+                } else {
+                    ForEach(viewModel.cache.customSchedules) { record in
+                        Button {
+                            selectedRecord = record
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(record.title)
+                                    .foregroundStyle(.primary)
+                                Text(record.subtitle)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                Text("\(record.dateString)  \(record.beginTime)-\(record.endTime)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("自定义日程")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("关闭") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        editingRecordID = nil
+                        draft = viewModel.customScheduleDraft(for: nil)
+                        isShowingEditor = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                }
+            }
+            .sheet(item: $selectedRecord) { record in
+                NavigationStack {
+                    List {
+                        Section {
+                            Text(record.title).font(.headline)
+                            if !record.subtitle.isEmpty {
+                                Text(record.subtitle).foregroundStyle(.secondary)
+                            }
+                        }
+
+                        Section("详情") {
+                            Text(record.description.isEmpty ? "无描述" : record.description)
+                            Text(record.dateString)
+                            Text("\(record.beginTime) - \(record.endTime)")
+                        }
+
+                        Section {
+                            Button("编辑") {
+                                selectedRecord = nil
+                                editingRecordID = record.id
+                                draft = viewModel.customScheduleDraft(for: record)
+                                isShowingEditor = true
+                            }
+                            Button("删除", role: .destructive) {
+                                viewModel.deleteCustomSchedule(id: record.id)
+                                selectedRecord = nil
+                            }
+                        }
+                    }
+                    .navigationTitle("自定义日程")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("关闭") { selectedRecord = nil }
+                        }
+                    }
+                }
+            }
+            .sheet(isPresented: $isShowingEditor) {
+                AddEditCustomScheduleSheet(
+                    draft: $draft,
+                    isEditing: editingRecordID != nil,
+                    onSubmit: {
+                        do {
+                            if let editingRecordID {
+                                try viewModel.updateCustomSchedule(id: editingRecordID, draft: draft)
+                            } else {
+                                try viewModel.addCustomSchedule(draft)
+                            }
+                            isShowingEditor = false
+                        } catch {
+                            viewModel.notice = ScheduleNotice(title: "保存失败", message: error.localizedDescription)
+                        }
+                    },
+                    onDismiss: { isShowingEditor = false }
+                )
+            }
+        }
+    }
+}
+
+private func normalize(entries: [ScheduleCalendarEntry]) -> [ScheduleCalendarEntry] {
+    let sorted = entries.sorted { lhs, rhs in
+        if lhs.dayOfWeek == rhs.dayOfWeek {
+            return lhs.startSection < rhs.startSection
+        }
+        return lhs.dayOfWeek < rhs.dayOfWeek
+    }
+
+    var result: [ScheduleCalendarEntry] = []
+
+    for day in 1 ... 7 {
+        var dayEntries: [ScheduleCalendarEntry] = []
+        for entry in sorted where entry.dayOfWeek == day {
+            if let last = dayEntries.last, last.endSection > entry.startSection {
+                if last.endSection < entry.endSection {
+                    dayEntries.append(
+                        ScheduleCalendarEntry(
+                            id: "\(entry.id)-trim-\(last.endSection)",
+                            sourceID: entry.sourceID,
+                            dayOfWeek: entry.dayOfWeek,
+                            startSection: last.endSection,
+                            endSection: entry.endSection,
+                            title: entry.title,
+                            subtitle: entry.subtitle,
+                            detailLines: entry.detailLines,
+                            kind: entry.kind
+                        )
+                    )
+                }
+            } else {
+                dayEntries.append(entry)
+            }
+        }
+        result.append(contentsOf: dayEntries)
+    }
+
+    return result
+}
+
+private func convertTimeToSection(timeText: String, timeTable: [TimeSlot]) -> CGFloat {
+    let minutes = TimeSlot.parseMinutes(timeText)
+    guard !timeTable.isEmpty else { return 0 }
+
+    let sectionIndex = timeTable.firstIndex(where: { minutes <= $0.endMinutes }) ?? (timeTable.count - 1)
+    let slot = timeTable[sectionIndex]
+    let duration = max(slot.endMinutes - slot.startMinutes, 1)
+    let rawRatio = CGFloat(minutes - slot.startMinutes) / CGFloat(duration)
+    let ratio = min(max(rawRatio, 0), 1)
+    return CGFloat(sectionIndex) + ratio
+}
+
+private func resolvedCurrentWeek(firstDay: Date) -> Int {
+    let start = Calendar.current.startOfDay(for: firstDay)
+    let today = Calendar.current.startOfDay(for: Date())
+    let diff = Calendar.current.dateComponents([.day], from: start, to: today).day ?? 0
+    return max(diff / 7 + 1, 1)
+}
+
+/// DDL 分页。
+private struct DDLScheduleTabView: View {
+    @ObservedObject var viewModel: ScheduleViewModel
+    @State private var selectedEvent: DDLEventRecord?
+    @State private var draft = DDLDraft()
+    @State private var editingEventID: String?
+    @State private var isShowingEditor = false
+
+    var body: some View {
+        Group {
+            if !viewModel.hasLexueCalendarURL {
+                VStack(spacing: 16) {
+                    Button {
+                        Task {
+                            await viewModel.refreshLexueCalendarURL()
+                            await viewModel.syncDDL()
+                        }
+                    } label: {
+                        HStack {
+                            if viewModel.isSyncingDDL {
+                                ProgressView()
+                            }
+                            Text("获取乐学日程")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(viewModel.isSyncingDDL)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List {
+                    if viewModel.visibleDDLEvents.isEmpty {
+                        Section {
+                            ContentUnavailableView(
+                                "暂无 DDL",
+                                systemImage: "list.bullet.clipboard",
+                                description: Text("先获取乐学日程，或手动添加一条。")
+                            )
+                            .frame(maxWidth: .infinity)
+                        }
+                    } else {
+                        Section {
+                            ForEach(viewModel.visibleDDLEvents) { event in
+                                DDLEventCard(
+                                    event: event,
+                                    remainText: viewModel.ddlRemainingText(for: event),
+                                    dueText: viewModel.ddlDueText(for: event),
+                                    tint: color(for: event),
+                                    onToggleDone: { viewModel.toggleDDLDone(event) },
+                                    onOpenDetail: { selectedEvent = event }
+                                )
+                            }
+                        }
+                    }
+                }
+                .listStyle(.insetGrouped)
+                .ignoresSafeArea(edges: .bottom)
+            }
+        }
+        .sheet(item: $selectedEvent) { event in
+            DDLEventDetailSheet(
+                event: event,
+                remainText: viewModel.ddlRemainingText(for: event),
+                onEdit: {
+                    editingEventID = event.id
+                    draft = viewModel.ddlDraft(for: event)
+                    isShowingEditor = true
+                },
+                onDelete: {
+                    viewModel.deleteDDL(id: event.id)
+                    selectedEvent = nil
+                }
+            )
+        }
+        .sheet(isPresented: $isShowingEditor) {
+            DDLEditSheet(
+                draft: $draft,
+                isEditing: editingEventID != nil,
+                onSubmit: {
+                    do {
+                        if let editingEventID {
+                            try viewModel.updateDDL(id: editingEventID, draft: draft)
+                        } else {
+                            try viewModel.addDDL(draft)
+                        }
+                        isShowingEditor = false
+                    } catch {
+                        viewModel.notice = ScheduleNotice(title: "保存失败", message: error.localizedDescription)
+                    }
+                },
+                onDismiss: { isShowingEditor = false }
+            )
+        }
+    }
+
+    private func color(for event: DDLEventRecord) -> Color {
+        switch viewModel.ddlTint(for: event) {
+        case "red":
+            return .red
+        case "orange":
+            return .orange
+        case "gray":
+            return .gray
+        default:
+            return .green
+        }
+    }
+}
+
+/// DDL 列表卡片。
+private struct DDLEventCard: View {
+    let event: DDLEventRecord
+    let remainText: String
+    let dueText: String
+    let tint: Color
+    let onToggleDone: () -> Void
+    let onOpenDetail: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Button(action: onToggleDone) {
+                Image(systemName: event.done ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(tint)
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(event.title)
+                    .font(.headline)
+                    .strikethrough(event.done)
+
+                if !event.text.isEmpty {
+                    Text(event.text)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                }
+
+                Text(remainText)
+                    .font(.subheadline)
+                    .foregroundStyle(tint)
+
+                Text(dueText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .onTapGesture(perform: onOpenDetail)
+    }
+}
+
+/// DDL 详情页。
+private struct DDLEventDetailSheet: View {
+    let event: DDLEventRecord
+    let remainText: String
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text(event.title)
+                        .font(.headline)
+                        .strikethrough(event.done)
+                    Text(ScheduleDateCodec.formatDateTime(event.dueAt))
+                        .foregroundStyle(.secondary)
+                    Text(event.group == "lexue" ? "乐学" : "自定义")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("详情") {
+                    Text(remainText)
+                    Text(event.text.isEmpty ? "无详情" : event.text)
+                }
+
+                if event.group != "lexue" {
+                    Section {
+                        Button("编辑") {
+                            dismiss()
+                            onEdit()
+                        }
+                        Button("删除", role: .destructive) {
+                            onDelete()
+                        }
+                    }
+                }
+            }
+            .navigationTitle("DDL 详情")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+/// 自定义 DDL 编辑页。
+private struct DDLEditSheet: View {
+    @Binding var draft: DDLDraft
+    let isEditing: Bool
+    let onSubmit: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("内容") {
+                    TextField("标题", text: $draft.title)
+                    DatePicker("时间", selection: $draft.dueAt, displayedComponents: [.date, .hourAndMinute])
+                    TextField("详情", text: $draft.text, axis: .vertical)
+                        .lineLimit(4, reservesSpace: true)
+                }
+            }
+            .navigationTitle(isEditing ? "编辑 DDL" : "添加 DDL")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消", action: onDismiss)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("确定", action: onSubmit)
+                }
+            }
+        }
+    }
+}
+
+/// 空教室查询页。
+///
+/// 交互上尽量保持“选校区 -> 自动拉默认楼 -> 再选楼”的顺序，减少无效点击。
+private struct FreeClassroomTabView: View {
+    @ObservedObject var viewModel: ScheduleViewModel
+
+    var body: some View {
+        List {
+            Section("筛选") {
+                if viewModel.isLoadingClassroomMeta && viewModel.campuses.isEmpty {
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 12) {
+                            ProgressView()
+                            Text("正在加载校区与教学楼…")
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 160)
+                    .alignmentGuide(.listRowSeparatorLeading) { _ in 0 }
+                } else {
+                    Picker("校区", selection: Binding(
+                        get: { viewModel.cache.selectedCampusCode },
+                        set: { newValue in
+                            Task {
+                                await viewModel.selectCampus(code: newValue)
+                            }
+                        }
+                    )) {
+                        ForEach(viewModel.campuses) { campus in
+                            Text(campus.name).tag(campus.code)
+                        }
+                    }
+
+                    Picker("教学楼", selection: Binding(
+                        get: { viewModel.selectedBuildingID },
+                        set: { newValue in
+                            Task {
+                                await viewModel.selectBuilding(id: newValue)
+                            }
+                        }
+                    )) {
+                        ForEach(viewModel.buildings) { building in
+                            Text(building.name).tag(building.buildingCode)
+                        }
+                    }
+                }
+
+                NavigationLink {
+                    ClassroomSectionFilterPage(
+                        timeTable: viewModel.cache.timeTable,
+                        selectedSectionIDs: Binding(
+                            get: { viewModel.cache.selectedClassroomSectionIDs },
+                            set: { viewModel.setSelectedClassroomSectionIDs($0) }
+                        )
+                    )
+                } label: {
+                    LabeledContent("节次筛选", value: viewModel.classroomSectionFilterSummary)
+                }
+            }
+
+            if viewModel.classroomAvailabilities.isEmpty {
+                Section {
+                    if viewModel.isLoadingClassrooms {
+                        VStack(spacing: 12) {
+                            ProgressView()
+                            Text("正在加载教室状态…")
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 180, alignment: .center)
+                    } else {
+                        ContentUnavailableView(
+                            "暂无空教室结果",
+                            systemImage: "building.2.crop.circle",
+                            description: Text("先选定校区和教学楼，再刷新一次。")
+                        )
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+            } else {
+                Section {
+                    ForEach(viewModel.classroomAvailabilities) { classroom in
+                        HStack(spacing: 12) {
+                            Text(classroom.name)
+                                .font(.headline)
+                            Spacer()
+                            Text(classroom.prettyFreeTimes)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.trailing)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .ignoresSafeArea(edges: .bottom)
+        .refreshable {
+            await viewModel.refreshClassroomPage()
+        }
+    }
+}
+
+/// 空教室节次筛选页。
+///
+/// 空选表示“当前空闲”，选择任一节次则按“命中任一节次空闲”筛选结果。
+private struct ClassroomSectionFilterPage: View {
+    let timeTable: [TimeSlot]
+    @Binding var selectedSectionIDs: [Int]
+
+    var body: some View {
+        List {
+            Section {
+                Button(toggleAllTitle) {
+                    toggleAll()
+                }
+            }
+
+            Section {
+                ForEach(timeTable) { slot in
+                    Button {
+                        toggle(slot.id)
+                    } label: {
+                        HStack {
+                            Text("第\(slot.id)节")
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Image(systemName: selectedSectionIDs.contains(slot.id) ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(selectedSectionIDs.contains(slot.id) ? Color.accentColor : .secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            } footer: {
+                Text("不选任何节次时，默认按“当前空闲”展示；选择具体节次后，会显示在所选任一节次内有空闲的教室。")
+            }
+        }
+        .navigationTitle("节次筛选")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func toggle(_ sectionID: Int) {
+        var next = selectedSectionIDs
+        if let index = next.firstIndex(of: sectionID) {
+            next.remove(at: index)
+        } else {
+            next.append(sectionID)
+        }
+        selectedSectionIDs = next.sorted()
+    }
+
+    private func toggleAll() {
+        if selectedSectionIDs.count == timeTable.count {
+            selectedSectionIDs = []
+        } else {
+            selectedSectionIDs = timeTable.map(\.id)
+        }
+    }
+
+    private var toggleAllTitle: String {
+        selectedSectionIDs.count == timeTable.count ? "全不选" : "全选"
+    }
+}

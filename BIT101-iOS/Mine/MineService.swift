@@ -1,0 +1,118 @@
+//
+//  MineService.swift
+//  BIT101-iOS
+//
+//  Created by Codex on 2026-03-24.
+//
+
+import Foundation
+
+/// “我的”页接口层错误。
+enum MineServiceError: LocalizedError {
+    case notLoggedIn
+    case invalidResponse
+
+    var errorDescription: String? {
+        switch self {
+        case .notLoggedIn:
+            return "当前登录状态无效，请重新登录后再查看个人主页。"
+        case .invalidResponse:
+            return "服务器返回了无法识别的数据。"
+        }
+    }
+}
+
+/// “我的”页网络层。
+struct MineService {
+    private let baseURL = URL(string: "https://bit101.flwfdd.xyz")!
+    private let session: URLSession
+    private let storage: LoginStorage
+
+    init(storage: LoginStorage = .shared) {
+        self.storage = storage
+
+        let configuration = URLSessionConfiguration.default
+        configuration.httpCookieStorage = HTTPCookieStorage.shared
+        configuration.httpCookieAcceptPolicy = .always
+        configuration.httpShouldSetCookies = true
+        session = URLSession(configuration: configuration)
+    }
+
+    /// 获取当前登录用户自己的资料卡信息。
+    func fetchMyInfo() async throws -> MineUserInfo {
+        try await sendJSONRequest(path: "user/info/0")
+    }
+
+    /// 获取我关注的用户列表。
+    func fetchFollowings(page: Int) async throws -> [GalleryUser] {
+        try await sendJSONRequest(path: "user/followings", queryItems: [URLQueryItem(name: "page", value: String(page))])
+    }
+
+    /// 获取我的粉丝列表。
+    func fetchFollowers(page: Int) async throws -> [GalleryUser] {
+        try await sendJSONRequest(path: "user/followers", queryItems: [URLQueryItem(name: "page", value: String(page))])
+    }
+
+    /// 获取“我的帖子”列表。
+    ///
+    /// 服务端通过 `uid=0` 约定当前登录用户。
+    func fetchMyPosters(page: Int) async throws -> [GalleryPoster] {
+        try await sendJSONRequest(
+            path: "posters",
+            queryItems: [
+                URLQueryItem(name: "mode", value: "search"),
+                URLQueryItem(name: "uid", value: "0"),
+                URLQueryItem(name: "page", value: String(page)),
+            ]
+        )
+    }
+
+    /// 发送带 fake-cookie 的通用 GET JSON 请求。
+    private func sendJSONRequest<Response: Decodable>(
+        path: String,
+        queryItems: [URLQueryItem] = []
+    ) async throws -> Response {
+        let fakeCookie = storage.fakeCookie
+        guard !fakeCookie.isEmpty else {
+            throw MineServiceError.notLoggedIn
+        }
+
+        var components = URLComponents(url: baseURL.appending(path: path), resolvingAgainstBaseURL: false)
+        components?.queryItems = queryItems.isEmpty ? nil : queryItems
+
+        guard let url = components?.url else {
+            throw MineServiceError.invalidResponse
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(fakeCookie, forHTTPHeaderField: "fake-cookie")
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw MineServiceError.invalidResponse
+        }
+
+        switch httpResponse.statusCode {
+        case 200 ..< 300:
+            break
+        case 401:
+            throw MineServiceError.notLoggedIn
+        default:
+            throw NSError(
+                domain: "BIT101.Mine",
+                code: httpResponse.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "请求失败，HTTP 状态码 \(httpResponse.statusCode)。"]
+            )
+        }
+
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+
+        do {
+            return try decoder.decode(Response.self, from: data)
+        } catch {
+            throw MineServiceError.invalidResponse
+        }
+    }
+}
