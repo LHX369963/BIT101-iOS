@@ -79,6 +79,7 @@ struct AppShellView: View {
     @ObservedObject private var settings = AppSettingsStore.shared
     @State private var selectedTab: AppTab = .schedule
     @State private var isShowingGalleryEULA = false
+    @State private var isShowingStartupNotice = false
     @State private var requestedScheduleSection: ScheduleSection?
 
     /// 登录后的应用壳层主体。
@@ -119,10 +120,20 @@ struct AppShellView: View {
                 }
             )
         }
+        .alert("1.1.0版本更新", isPresented: $isShowingStartupNotice) {
+            Button("确定") {
+                settings.markCurrentStartupNoticeSeen()
+            }
+        } message: {
+            Text("1、bugfix\n2、支持桌面小组件\n3、灵动岛")
+        }
         .onAppear {
             let initial = settings.visibleTabs.contains(settings.homeTab) ? settings.homeTab : (settings.visibleTabs.first ?? .schedule)
             if selectedTab != initial {
                 selectTab(initial)
+            }
+            if settings.shouldShowCurrentStartupNotice {
+                isShowingStartupNotice = true
             }
         }
         .onChange(of: settings.snapshot) { _, _ in

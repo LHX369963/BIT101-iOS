@@ -92,6 +92,8 @@ final class AppSettingsStore: ObservableObject {
     static let shared = AppSettingsStore()
     nonisolated static let storageKeyPrefix = "app.settings.snapshot"
     nonisolated static let currentCommunityRulesVersion = 2
+    nonisolated static let currentStartupNoticeVersion = "1.1.0"
+    nonisolated static let startupNoticeSeenKey = "app.startup.notice.seen.version"
 
     @Published private(set) var snapshot = AppSettingsSnapshot()
 
@@ -105,7 +107,10 @@ final class AppSettingsStore: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.load()
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                self.load()
+            }
         }
     }
 
@@ -131,6 +136,9 @@ final class AppSettingsStore: ObservableObject {
     var hasAcceptedCurrentCommunityRules: Bool { snapshot.galleryCommunityRulesAcceptedVersion >= Self.currentCommunityRulesVersion }
     var autoDetectUpgrade: Bool { snapshot.autoDetectUpgrade }
     var ignoredVersion: Int { snapshot.ignoredVersion }
+    var shouldShowCurrentStartupNotice: Bool {
+        defaults.string(forKey: Self.startupNoticeSeenKey) != Self.currentStartupNoticeVersion
+    }
 
     /// 当前真正可见的底部页面集合。
     var visibleTabs: [AppTab] {
@@ -264,6 +272,11 @@ final class AppSettingsStore: ObservableObject {
     func setIgnoredVersion(_ version: Int) {
         snapshot.ignoredVersion = version
         save()
+    }
+
+    /// 标记当前版本的开屏通知已读。
+    func markCurrentStartupNoticeSeen() {
+        defaults.set(Self.currentStartupNoticeVersion, forKey: Self.startupNoticeSeenKey)
     }
 
     /// 把设置恢复到默认值。

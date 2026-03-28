@@ -81,12 +81,12 @@ final class ScheduleLiveActivityManager {
         if let activity = Activity<CourseReminderActivityAttributes>.activities.first {
             if activity.attributes.studentID != attributes.studentID {
                 await activity.end(nil, dismissalPolicy: .immediate)
-                try? Activity.request(attributes: attributes, content: content)
+                _ = try? Activity.request(attributes: attributes, content: content)
                 return
             }
             await activity.update(content)
         } else {
-            try? Activity.request(attributes: attributes, content: content)
+            _ = try? Activity.request(attributes: attributes, content: content)
         }
     }
 
@@ -108,9 +108,7 @@ final class ScheduleLiveActivityManager {
                 guard
                     let week = course.weeks.first(where: { week in
                         guard
-                            let startSlot = slotMap[course.startSection],
                             let endSlot = slotMap[course.endSection],
-                            let startDate = combine(firstDay: firstDay, week: week, weekday: course.weekday, time: startSlot.start),
                             let endDate = combine(firstDay: firstDay, week: week, weekday: course.weekday, time: endSlot.end)
                         else {
                             return false
@@ -125,7 +123,6 @@ final class ScheduleLiveActivityManager {
                     return nil
                 }
 
-                let isCurrent = startDate <= now && now < endDate
                 return CourseReminderOccurrence(
                     kindText: "上课",
                     title: normalizeCourseTitle(course.name),
@@ -149,7 +146,6 @@ final class ScheduleLiveActivityManager {
                 return nil
             }
 
-            let isCurrent = startDate <= now && now < endDate
             return CourseReminderOccurrence(
                 kindText: "日程",
                 title: schedule.title,
