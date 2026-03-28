@@ -791,7 +791,7 @@ private struct AboutSettingsPage: View {
             }
 
             Section("联系我们") {
-                Link("项目仓库", destination: URL(string: "https://github.com/BIT101-dev/BIT101-Android")!)
+                Link("项目仓库", destination: URL(string: "https://github.com/LHX369963/BIT101-iOS")!)
                 Link("QQ交流群", destination: URL(string: "https://jq.qq.com/?_wv=1027&k=OTttwrzb")!)
                 Link("邮箱", destination: URL(string: "mailto:systemd@linux.do")!)
             }
