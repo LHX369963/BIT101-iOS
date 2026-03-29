@@ -772,6 +772,14 @@ private struct AboutSettingsPage: View {
 
     var body: some View {
         List {
+            Section("致谢") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("特别感谢 LINUX DO（L站）以及佬友们。这个 App 的诞生，离不开他们提供的免费 tokens 与无私的支持。L站倡导“真诚、友善、团结、专业，共建你我引以为荣之社区。”某种意义上，BIT101 也是在这样的氛围里，被一点点推出来的。")
+                    Link("如果你也想加入，可以点击此处，向开发者发送邮件，以索要L站邀请码。", destination: URL(string: "mailto:systemd@linux.do")!)
+                }
+                .padding(.vertical, 2)
+            }
+
             Section("版本信息") {
                 LabeledContent("当前版本", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "未知")
             }
@@ -792,14 +800,6 @@ private struct AboutSettingsPage: View {
                             .textSelection(.enabled)
                     }
                     .navigationTitle("开源声明")
-                }
-
-                NavigationLink("关于 BIT101") {
-                    ScrollView {
-                        Text("BIT101 当前已接入设置页、课表、DDL、空教室、地图、话廊、成绩、我的等基础能力，后续会继续完善体验与细节。")
-                            .padding()
-                    }
-                    .navigationTitle("关于 BIT101")
                 }
             }
 
