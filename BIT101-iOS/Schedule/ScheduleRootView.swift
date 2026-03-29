@@ -735,7 +735,7 @@ private struct AddEditCustomScheduleSheet: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-            }
+          }
             .navigationTitle(isEditing ? "修改自定义日程" : "添加自定义日程")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

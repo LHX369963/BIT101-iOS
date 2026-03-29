@@ -135,14 +135,19 @@ enum CommunityModeration {
         texts.contains { containsBlockedContent($0) }
     }
 
-    /// 带机器人标签的服务端帖子不参与自动屏蔽。
-    ///
-    /// 这条例外只作用于入站展示过滤，不影响用户主动发帖时的检测。
-    static func shouldBypassDirtyWords(tags: [String]) -> Bool {
+    /// 判断一条帖子是否带有机器人标签。
+    static func isBotPoster(tags: [String]) -> Bool {
         let normalizedTags = tags.map(normalize)
         return normalizedTags.contains { tag in
             botTagKeywords.contains(where: { keyword in tag.contains(normalize(keyword)) })
         }
+    }
+
+    /// 带机器人标签的服务端帖子不参与自动屏蔽。
+    ///
+    /// 这条例外只作用于入站展示过滤，不影响用户主动发帖时的检测。
+    static func shouldBypassDirtyWords(tags: [String]) -> Bool {
+        isBotPoster(tags: tags)
     }
 
     /// 发帖前对标题、正文和标签执行统一校验。

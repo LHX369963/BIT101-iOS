@@ -43,6 +43,11 @@ struct MineService {
         try await sendJSONRequest(path: "user/info/0")
     }
 
+    /// 获取指定用户的公开资料卡信息。
+    func fetchUserInfo(id: Int) async throws -> MineUserInfo {
+        try await sendJSONRequest(path: "user/info/\(id)")
+    }
+
     /// 获取我关注的用户列表。
     func fetchFollowings(page: Int) async throws -> [GalleryUser] {
         try await sendJSONRequest(path: "user/followings", queryItems: [URLQueryItem(name: "page", value: String(page))])
@@ -62,6 +67,18 @@ struct MineService {
             queryItems: [
                 URLQueryItem(name: "mode", value: "search"),
                 URLQueryItem(name: "uid", value: "0"),
+                URLQueryItem(name: "page", value: String(page)),
+            ]
+        )
+    }
+
+    /// 获取指定用户的帖子列表。
+    func fetchUserPosters(userID: Int, page: Int) async throws -> [GalleryPoster] {
+        try await sendJSONRequest(
+            path: "posters",
+            queryItems: [
+                URLQueryItem(name: "mode", value: "search"),
+                URLQueryItem(name: "uid", value: String(userID)),
                 URLQueryItem(name: "page", value: String(page)),
             ]
         )

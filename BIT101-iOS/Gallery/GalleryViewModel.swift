@@ -13,6 +13,13 @@ import Foundation
 ///
 /// 同时管理四个 feed 和一个搜索结果页，并显式处理分页、刷新和取消错误。
 final class GalleryViewModel: ObservableObject {
+    private struct GalleryPrefetchedPage {
+        let page: Int
+        let posters: [GalleryPoster]
+        let nextPage: Int
+        let canLoadMore: Bool
+    }
+
     @Published var selectedFeed: GalleryFeedKind = .recommend
     @Published var searchQuery = GallerySearchQuery()
     @Published var searchState = GalleryFeedState()
@@ -26,6 +33,9 @@ final class GalleryViewModel: ObservableObject {
     }()
 
     private let service: GalleryService
+    private var prefetchedRecommendPages: [GalleryPrefetchedPage] = []
+    private var recommendPrefetchTask: Task<Void, Never>?
+    private let recommendPrefetchDepth = 2
 
     init(service: GalleryService) {
         self.service = service
@@ -54,6 +64,9 @@ final class GalleryViewModel: ObservableObject {
         if previousState.status == .loading {
             return
         }
+        if feed == .recommend {
+            clearRecommendPrefetch()
+        }
         setState(for: feed) {
             $0.status = .loading
             $0.isLoadingMore = false
@@ -62,12 +75,36 @@ final class GalleryViewModel: ObservableObject {
         }
 
         do {
-            let posters = try await service.fetchFeed(kind: feed, page: nil)
-            setState(for: feed) {
-                $0.posters = posters
-                $0.status = .loaded
-                $0.nextPage = 1
-                $0.canLoadMore = !posters.isEmpty
+            if feed.isBotFeed {
+                let batch = try await service.fetchBotFeed(startPage: 0)
+                setState(for: feed) {
+                    $0.posters = batch.posters
+                    $0.status = .loaded
+                    $0.nextPage = batch.nextSourcePage
+                    $0.canLoadMore = batch.canLoadMore
+                }
+            } else {
+                if feed == .recommend {
+                    let batch = try await service.fetchRecommendFeed(startPage: 0)
+                    setState(for: feed) {
+                        $0.posters = deduplicate(batch.posters)
+                        $0.status = .loaded
+                        $0.nextPage = batch.nextSourcePage
+                        $0.canLoadMore = batch.canLoadMore
+                    }
+                    if batch.canLoadMore {
+                        startRecommendPrefetching(from: batch.nextSourcePage)
+                    }
+                } else {
+                    let posters = try await service.fetchFeed(kind: feed, page: nil)
+                    let uniquePosters = deduplicate(posters)
+                    setState(for: feed) {
+                        $0.posters = uniquePosters
+                        $0.status = .loaded
+                        $0.nextPage = 1
+                        $0.canLoadMore = !posters.isEmpty
+                    }
+                }
             }
         } catch {
             if isCancellation(error) {
@@ -87,8 +124,28 @@ final class GalleryViewModel: ObservableObject {
                 $0.status = .failed(error.localizedDescription)
                 $0.canLoadMore = false
             }
-            alert = LoginAlert(title: "加载话题失败", message: error.localizedDescription)
+            alert = LoginAlert(title: "加载话廊失败", message: error.localizedDescription)
         }
+    }
+
+    /// 推荐流在接近尾部时提前预取，但真正 append 仍然等到最后一条出现。
+    func prefetchIfNeeded(for feed: GalleryFeedKind, currentPoster: GalleryPoster?) async {
+        guard feed == .recommend else { return }
+        guard let currentPoster else { return }
+
+        let state = state(for: feed)
+        guard
+            state.status == .loaded,
+            state.canLoadMore,
+            !state.posters.isEmpty
+        else {
+            return
+        }
+
+        let triggerIDs = Set(state.posters.suffix(10).map(\.id))
+        guard triggerIDs.contains(currentPoster.id) else { return }
+
+        startRecommendPrefetching(from: state.nextPage)
     }
 
     /// 当用户滚动到尾部附近时触发分页加载。
@@ -99,8 +156,7 @@ final class GalleryViewModel: ObservableObject {
         guard
             state.status == .loaded,
             !state.isLoadingMore,
-            state.canLoadMore,
-            state.posters.suffix(4).contains(where: { $0.id == currentPoster.id })
+            state.canLoadMore
         else {
             return
         }
@@ -108,12 +164,59 @@ final class GalleryViewModel: ObservableObject {
         setState(for: feed) { $0.isLoadingMore = true }
 
         do {
-            let posters = try await service.fetchFeed(kind: feed, page: state.nextPage)
-            setState(for: feed) {
-                $0.posters.append(contentsOf: posters)
-                $0.isLoadingMore = false
-                $0.nextPage += 1
-                $0.canLoadMore = !posters.isEmpty
+            if feed.isBotFeed {
+                let batch = try await service.fetchBotFeed(startPage: state.nextPage)
+                setState(for: feed) {
+                    $0.posters.append(contentsOf: batch.posters)
+                    $0.isLoadingMore = false
+                    $0.nextPage = batch.nextSourcePage
+                    $0.canLoadMore = batch.canLoadMore
+                }
+            } else if feed == .recommend {
+                var mergedPosters = state.posters
+                var nextPage = state.nextPage
+                var canLoadMore = state.canLoadMore
+                var attempt = 0
+
+                while attempt < 3, canLoadMore, mergedPosters.count == state.posters.count {
+                    let batch: GalleryPrefetchedPage
+                    if let prefetchedPage = takePrefetchedRecommendPage(for: nextPage) {
+                        batch = prefetchedPage
+                    } else {
+                        let loadedBatch = try await service.fetchRecommendFeed(startPage: nextPage)
+                        batch = GalleryPrefetchedPage(
+                            page: nextPage,
+                            posters: deduplicate(loadedBatch.posters),
+                            nextPage: loadedBatch.nextSourcePage,
+                            canLoadMore: loadedBatch.canLoadMore
+                        )
+                    }
+
+                    mergedPosters = mergeUnique(existing: mergedPosters, incoming: batch.posters)
+                    nextPage = batch.nextPage
+                    canLoadMore = batch.canLoadMore
+                    attempt += 1
+                }
+
+                setState(for: feed) {
+                    $0.posters = mergedPosters
+                    $0.isLoadingMore = false
+                    $0.nextPage = nextPage
+                    $0.canLoadMore = canLoadMore
+                }
+                if canLoadMore {
+                    startRecommendPrefetching(from: nextPage)
+                }
+            } else {
+                let posters = try await service.fetchFeed(kind: feed, page: state.nextPage)
+                let mergedPosters = mergeUnique(existing: state.posters, incoming: posters)
+                let nextPage = state.nextPage + 1
+                setState(for: feed) {
+                    $0.posters = mergedPosters
+                    $0.isLoadingMore = false
+                    $0.nextPage = nextPage
+                    $0.canLoadMore = !posters.isEmpty
+                }
             }
         } catch {
             if isCancellation(error) {
@@ -162,8 +265,7 @@ final class GalleryViewModel: ObservableObject {
         guard
             searchState.status == .loaded,
             !searchState.isLoadingMore,
-            searchState.canLoadMore,
-            searchState.posters.suffix(4).contains(where: { $0.id == currentPoster.id })
+            searchState.canLoadMore
         else {
             return
         }
@@ -202,6 +304,387 @@ final class GalleryViewModel: ObservableObject {
         var state = feedStates[feed] ?? GalleryFeedState()
         mutate(&state)
         feedStates[feed] = state
+    }
+
+    /// 推荐流最多后台缓存两页，既保证顺滑，也避免无限预取占用内存。
+    private func startRecommendPrefetching(from startPage: Int) {
+        guard recommendPrefetchTask == nil else { return }
+
+        let existingPages = Set(prefetchedRecommendPages.map(\.page))
+        guard !existingPages.contains(startPage) else { return }
+
+        recommendPrefetchTask = Task { [service] in
+            defer { recommendPrefetchTask = nil }
+
+            var currentPage = startPage
+            var prefetchedCount = 0
+
+            while prefetchedCount < recommendPrefetchDepth {
+                guard !Task.isCancelled else { return }
+
+                if prefetchedRecommendPages.contains(where: { $0.page == currentPage }) {
+                    guard let existingBatch = prefetchedRecommendPages.first(where: { $0.page == currentPage }) else {
+                        return
+                    }
+                    if !existingBatch.canLoadMore {
+                        return
+                    }
+                    currentPage = existingBatch.nextPage
+                    prefetchedCount += 1
+                    continue
+                }
+
+                do {
+                    let batch = try await service.fetchRecommendFeed(startPage: currentPage)
+                    guard !Task.isCancelled else { return }
+                    appendPrefetchedRecommendPage(
+                        page: currentPage,
+                        posters: deduplicate(batch.posters),
+                        nextPage: batch.nextSourcePage,
+                        canLoadMore: batch.canLoadMore
+                    )
+                    if !batch.canLoadMore {
+                        return
+                    }
+                    currentPage = batch.nextSourcePage
+                    prefetchedCount += 1
+                } catch {
+                    if isCancellation(error) {
+                        return
+                    }
+                    return
+                }
+            }
+        }
+    }
+
+    /// 记录已经预取好的推荐页，并保持页码有序。
+    private func appendPrefetchedRecommendPage(page: Int, posters: [GalleryPoster], nextPage: Int, canLoadMore: Bool) {
+        prefetchedRecommendPages.removeAll { $0.page == page }
+        prefetchedRecommendPages.append(
+            GalleryPrefetchedPage(
+                page: page,
+                posters: posters,
+                nextPage: nextPage,
+                canLoadMore: canLoadMore
+            )
+        )
+        prefetchedRecommendPages.sort { $0.page < $1.page }
+    }
+
+    /// 读取并消费已经预取好的推荐页。
+    private func takePrefetchedRecommendPage(for page: Int) -> GalleryPrefetchedPage? {
+        guard let index = prefetchedRecommendPages.firstIndex(where: { $0.page == page }) else { return nil }
+        return prefetchedRecommendPages.remove(at: index)
+    }
+
+    /// 刷新推荐流时，需要丢掉旧的预取结果，避免拼接到新列表上。
+    private func clearRecommendPrefetch() {
+        recommendPrefetchTask?.cancel()
+        recommendPrefetchTask = nil
+        prefetchedRecommendPages = []
+    }
+
+    /// 推荐流可能出现重复帖子，这里按帖子 ID 去重后再拼接。
+    private func mergeUnique(existing: [GalleryPoster], incoming: [GalleryPoster]) -> [GalleryPoster] {
+        var seenIDs = Set(existing.map(\.id))
+        var merged = existing
+
+        for poster in incoming where seenIDs.insert(poster.id).inserted {
+            merged.append(poster)
+        }
+
+        return merged
+    }
+
+    /// 首屏返回的推荐结果也可能包含重复项，先做一次稳定去重。
+    private func deduplicate(_ posters: [GalleryPoster]) -> [GalleryPoster] {
+        mergeUnique(existing: [], incoming: posters)
+    }
+
+    /// 同时兼容 Swift Concurrency 的 `CancellationError` 和 URLSession 的 `-999 cancelled`。
+    private func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+    }
+}
+
+/// 本地保存的消息已读快照。
+///
+/// 服务端只有分类未读数，没有逐条已读状态，这里按账号做一层“伪新消息”持久化。
+private struct GalleryMessageReadSnapshot: Codable {
+    var latestIDsByType: [String: [Int]] = [:]
+    var seenIDsByType: [String: [Int]] = [:]
+}
+
+/// 本地消息已读仓库。
+///
+/// 只记录“当前分类最新一批消息”和“已被用户手动标记已读的消息”，不申请系统通知。
+private final class GalleryMessageReadStore {
+    static let shared = GalleryMessageReadStore()
+
+    private let defaults = UserDefaults.standard
+    private let keyPrefix = "gallery.message.read.snapshot"
+
+    private init() {}
+
+    /// 读取当前账号对应的本地快照。
+    private func loadSnapshot() -> GalleryMessageReadSnapshot {
+        guard
+            let data = defaults.data(forKey: storageKey),
+            let snapshot = try? JSONDecoder().decode(GalleryMessageReadSnapshot.self, from: data)
+        else {
+            return GalleryMessageReadSnapshot()
+        }
+        return snapshot
+    }
+
+    /// 回写当前账号的本地快照。
+    private func saveSnapshot(_ snapshot: GalleryMessageReadSnapshot) {
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        defaults.set(data, forKey: storageKey)
+    }
+
+    /// 用服务端给出的未读数量，重建当前分类的“候选新消息”集合。
+    ///
+    /// 当服务端未读数为 0 时，不主动覆盖本地结果，避免用户刚打开列表时就把视觉上的新消息全抹掉。
+    func replaceLatestIDs(_ ids: [Int], unreadCount: Int, for type: GalleryMessageType) {
+        guard unreadCount > 0 else { return }
+
+        var snapshot = loadSnapshot()
+        let latestUnread = Array(ids.prefix(unreadCount))
+        let normalizedLatest = normalize(latestUnread)
+        let existingSeen = Set(snapshot.seenIDsByType[type.rawValue] ?? [])
+
+        snapshot.latestIDsByType[type.rawValue] = normalizedLatest
+        snapshot.seenIDsByType[type.rawValue] = normalizedLatest.filter { existingSeen.contains($0) }
+        saveSnapshot(snapshot)
+    }
+
+    /// 把指定消息标记为已读。
+    func markSeen(ids: [Int], for type: GalleryMessageType) {
+        var snapshot = loadSnapshot()
+        let existing = Set(snapshot.seenIDsByType[type.rawValue] ?? [])
+        snapshot.seenIDsByType[type.rawValue] = normalize(Array(existing.union(ids)))
+        saveSnapshot(snapshot)
+    }
+
+    /// 当前分类本地仍被视作“新消息”的数量。
+    func unreadCount(for type: GalleryMessageType) -> Int {
+        let latest = Set(loadSnapshot().latestIDsByType[type.rawValue] ?? [])
+        guard !latest.isEmpty else { return 0 }
+        let seen = Set(loadSnapshot().seenIDsByType[type.rawValue] ?? [])
+        return latest.subtracting(seen).count
+    }
+
+    /// 判断某条消息是否需要按“新消息”样式展示。
+    func isUnread(id: Int, for type: GalleryMessageType) -> Bool {
+        let snapshot = loadSnapshot()
+        let latest = Set(snapshot.latestIDsByType[type.rawValue] ?? [])
+        guard latest.contains(id) else { return false }
+        let seen = Set(snapshot.seenIDsByType[type.rawValue] ?? [])
+        return !seen.contains(id)
+    }
+
+    private var storageKey: String {
+        let studentID = LoginStorage.shared.currentStudentID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suffix = studentID.isEmpty ? "guest" : studentID
+        return "\(keyPrefix).\(suffix)"
+    }
+
+    private func normalize(_ ids: [Int]) -> [Int] {
+        Array(NSOrderedSet(array: ids)) as? [Int] ?? ids
+    }
+}
+
+@MainActor
+/// 消息中心状态机。
+///
+/// 负责未读数、分类切换和按 `last_id` 分页加载消息列表。
+final class GalleryMessageViewModel: ObservableObject {
+    @Published var selectedType: GalleryMessageType = .comment
+    @Published private(set) var unreadCounts = GalleryMessageUnreadCounts()
+    @Published var alert: LoginAlert?
+    @Published private var localReadVersion = 0
+
+    @Published private(set) var listStates: [GalleryMessageType: GalleryMessageListState] = {
+        var states: [GalleryMessageType: GalleryMessageListState] = [:]
+        GalleryMessageType.allCases.forEach { states[$0] = GalleryMessageListState() }
+        return states
+    }()
+
+    private let service: GalleryService
+    private let readStore: GalleryMessageReadStore
+
+    private init(service: GalleryService, readStore: GalleryMessageReadStore) {
+        self.service = service
+        self.readStore = readStore
+    }
+
+    convenience init() {
+        self.init(service: GalleryService(), readStore: .shared)
+    }
+
+    /// 悬浮消息按钮使用的总未读数。
+    var totalUnreadCount: Int {
+        GalleryMessageType.allCases.reduce(0) { partialResult, type in
+            partialResult + unreadCount(for: type)
+        }
+    }
+
+    /// 当前分类是否仍有本地“新消息”。
+    var hasUnreadInCurrentType: Bool {
+        unreadCount(for: selectedType) > 0
+    }
+
+    /// 首次进入消息页时刷新未读数，并加载默认分类。
+    func bootstrapIfNeeded() async {
+        await refreshUnreadCounts()
+        guard state(for: selectedType).status == .idle else { return }
+        await refresh(type: selectedType)
+    }
+
+    /// 单独刷新消息按钮上的未读红点。
+    func refreshUnreadCounts() async {
+        do {
+            unreadCounts = try await service.fetchMessageUnreadCounts()
+        } catch {
+            if isCancellation(error) { return }
+        }
+    }
+
+    /// 刷新当前选中的消息分类。
+    func refreshSelectedType() async {
+        await refresh(type: selectedType)
+    }
+
+    /// 从第一页重新拉取指定消息分类。
+    ///
+    /// 首次分页会顺手清空该分类未读数，所以这里在成功后同步刷新摘要。
+    func refresh(type: GalleryMessageType) async {
+        let previousState = state(for: type)
+        if previousState.status == .loading {
+            return
+        }
+
+        let serverUnreadBeforeFetch = unreadCounts.unreadCount(for: type)
+
+        setState(for: type) {
+            $0.status = .loading
+            $0.isLoadingMore = false
+            $0.canLoadMore = true
+            $0.nextLastID = nil
+        }
+
+        do {
+            let messages = try await service.fetchMessages(type: type, lastID: nil)
+            readStore.replaceLatestIDs(messages.map(\.id), unreadCount: serverUnreadBeforeFetch, for: type)
+            setState(for: type) {
+                $0.items = messages
+                $0.status = .loaded
+                $0.nextLastID = messages.last?.id
+                $0.canLoadMore = !messages.isEmpty
+            }
+            localReadVersion += 1
+            await refreshUnreadCounts()
+        } catch {
+            if isCancellation(error) {
+                setState(for: type) {
+                    $0.items = previousState.items
+                    $0.status = previousState.items.isEmpty ? .idle : .loaded
+                    $0.isLoadingMore = false
+                    $0.nextLastID = previousState.nextLastID
+                    $0.canLoadMore = previousState.canLoadMore
+                }
+                return
+            }
+
+            setState(for: type) {
+                $0.items = []
+                $0.status = .failed(error.localizedDescription)
+                $0.canLoadMore = false
+            }
+            alert = LoginAlert(title: "加载消息失败", message: error.localizedDescription)
+        }
+    }
+
+    /// 读取某个分类的“伪新消息”未读数。
+    ///
+    /// 如果本地已有候选新消息，则优先显示本地结果；否则回退到服务端分类未读数。
+    func unreadCount(for type: GalleryMessageType) -> Int {
+        _ = localReadVersion
+        let localUnread = readStore.unreadCount(for: type)
+        return localUnread > 0 ? localUnread : unreadCounts.unreadCount(for: type)
+    }
+
+    /// 判断某条消息是否需要按“新消息”样式展示。
+    func isUnread(_ message: GalleryMessage, in type: GalleryMessageType) -> Bool {
+        _ = localReadVersion
+        return readStore.isUnread(id: message.id, for: type)
+    }
+
+    /// 将当前分类里已加载到页面上的消息全部标记为已读。
+    func markCurrentTypeAsRead() {
+        let ids = state(for: selectedType).items.map(\.id)
+        guard !ids.isEmpty else { return }
+        readStore.markSeen(ids: ids, for: selectedType)
+        localReadVersion += 1
+    }
+
+    /// 将单条消息标记为已读。
+    func markMessageAsRead(_ message: GalleryMessage, in type: GalleryMessageType) {
+        readStore.markSeen(ids: [message.id], for: type)
+        localReadVersion += 1
+    }
+
+    /// 当滚动到尾部附近时触发分页加载。
+    func loadMoreIfNeeded(for type: GalleryMessageType, currentMessage: GalleryMessage?) async {
+        guard let currentMessage else { return }
+        let state = state(for: type)
+
+        guard
+            state.status == .loaded,
+            !state.isLoadingMore,
+            state.canLoadMore,
+            state.items.suffix(4).contains(where: { $0.id == currentMessage.id })
+        else {
+            return
+        }
+
+        setState(for: type) { $0.isLoadingMore = true }
+
+        do {
+            let messages = try await service.fetchMessages(type: type, lastID: state.nextLastID)
+            setState(for: type) {
+                $0.items.append(contentsOf: messages)
+                $0.isLoadingMore = false
+                $0.nextLastID = messages.last?.id ?? $0.nextLastID
+                $0.canLoadMore = !messages.isEmpty
+            }
+        } catch {
+            if isCancellation(error) {
+                setState(for: type) { $0.isLoadingMore = false }
+                return
+            }
+            setState(for: type) { $0.isLoadingMore = false }
+            alert = LoginAlert(title: "加载更多失败", message: error.localizedDescription)
+        }
+    }
+
+    /// 读取某个分类的当前列表状态。
+    func state(for type: GalleryMessageType) -> GalleryMessageListState {
+        listStates[type] ?? GalleryMessageListState()
+    }
+
+    /// 统一回写单个分类的可变状态。
+    private func setState(for type: GalleryMessageType, mutate: (inout GalleryMessageListState) -> Void) {
+        var state = listStates[type] ?? GalleryMessageListState()
+        mutate(&state)
+        listStates[type] = state
     }
 
     /// 同时兼容 Swift Concurrency 的 `CancellationError` 和 URLSession 的 `-999 cancelled`。

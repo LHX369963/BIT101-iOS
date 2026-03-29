@@ -10,13 +10,15 @@ import UIKit
 
 // MARK: - Gallery Root
 
-/// 话题页根视图。
+/// 话廊页根视图。
 ///
 /// 顶部负责 feed 切换，下方负责承载当前选中的帖子流，并支持左右轻扫切换分区。
 struct GalleryRootView: View {
     @StateObject private var viewModel = GalleryViewModel()
+    @StateObject private var messageViewModel = GalleryMessageViewModel()
     @ObservedObject private var settings = AppSettingsStore.shared
     @State private var isShowingComposer = false
+    @State private var isShowingMessages = false
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -26,8 +28,12 @@ struct GalleryRootView: View {
             GalleryFeedView(
                 feedState: filteredState(for: viewModel.selectedFeed),
                 feedIdentity: viewModel.selectedFeed.rawValue,
+                prefetchTriggerThreshold: viewModel.selectedFeed == .recommend ? 10 : 0,
                 onRefresh: {
                     await viewModel.refresh(feed: viewModel.selectedFeed)
+                },
+                onPrefetch: { poster in
+                    await viewModel.prefetchIfNeeded(for: viewModel.selectedFeed, currentPoster: poster)
                 },
                 onLoadMore: { poster in
                     await viewModel.loadMoreIfNeeded(for: viewModel.selectedFeed, currentPoster: poster)
@@ -43,12 +49,19 @@ struct GalleryRootView: View {
                 GalleryFloatingActionButton(systemImage: "magnifyingglass") {
                     viewModel.isShowingSearch = true
                 }
+
+                GalleryFloatingActionButton(
+                    systemImage: "bell.badge",
+                    badgeText: messageBadgeText
+                ) {
+                    isShowingMessages = true
+                }
             }
             .padding(.trailing, 10)
             .padding(.bottom, 20)
         }
         .safeAreaInset(edge: .top) {
-            Picker("话题分区", selection: $viewModel.selectedFeed) {
+            Picker("话廊分区", selection: $viewModel.selectedFeed) {
                 ForEach(GalleryFeedKind.allCases) { feed in
                     Text(feed.title).tag(feed)
                 }
@@ -61,7 +74,9 @@ struct GalleryRootView: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .task {
-            await viewModel.bootstrapIfNeeded()
+            async let feedTask: Void = viewModel.bootstrapIfNeeded()
+            async let messageTask: Void = messageViewModel.refreshUnreadCounts()
+            _ = await (feedTask, messageTask)
         }
         .onChange(of: viewModel.selectedFeed) { _, newFeed in
             if viewModel.state(for: newFeed).status == .idle {
@@ -74,6 +89,12 @@ struct GalleryRootView: View {
             NavigationStack {
                 GallerySearchView(viewModel: viewModel)
             }
+        }
+        .sheet(isPresented: $isShowingMessages) {
+            NavigationStack {
+                GalleryMessagesView(viewModel: messageViewModel)
+            }
+            .presentationDragIndicator(.hidden)
         }
         .sheet(isPresented: $isShowingComposer) {
             GalleryComposerView {
@@ -96,6 +117,12 @@ struct GalleryRootView: View {
         var state = viewModel.state(for: feed)
         state.posters = filterPosters(state.posters)
         return state
+    }
+
+    private var messageBadgeText: String? {
+        let count = messageViewModel.totalUnreadCount
+        guard count > 0 else { return nil }
+        return count > 99 ? "99+" : String(count)
     }
 
     private var feedSwitchGesture: some Gesture {
@@ -134,15 +161,34 @@ struct GalleryRootView: View {
 
 private struct GalleryFloatingActionButton: View {
     let systemImage: String
+    let badgeText: String?
     let action: () -> Void
+
+    init(systemImage: String, badgeText: String? = nil, action: @escaping () -> Void) {
+        self.systemImage = systemImage
+        self.badgeText = badgeText
+        self.action = action
+    }
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.primary)
-                .frame(width: 42, height: 42)
-                .background(.ultraThinMaterial, in: Circle())
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 42, height: 42)
+                    .background(.ultraThinMaterial, in: Circle())
+
+                if let badgeText {
+                    Text(badgeText)
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, badgeText.count > 2 ? 5 : 4)
+                        .frame(minWidth: 18, minHeight: 18)
+                        .background(Color.red, in: Capsule())
+                        .offset(x: 5, y: -5)
+                }
+            }
         }
         .buttonStyle(.plain)
     }
@@ -152,7 +198,9 @@ private struct GalleryFloatingActionButton: View {
 private struct GalleryFeedView: View {
     let feedState: GalleryFeedState
     let feedIdentity: String
+    let prefetchTriggerThreshold: Int
     let onRefresh: @Sendable () async -> Void
+    let onPrefetch: @Sendable (GalleryPoster?) async -> Void
     let onLoadMore: @Sendable (GalleryPoster?) async -> Void
     @ObservedObject private var settings = AppSettingsStore.shared
     private let reportService = CommunityReportService()
@@ -164,7 +212,7 @@ private struct GalleryFeedView: View {
     var body: some View {
         Group {
             if isInitialLoading {
-                ProgressView("正在加载话题")
+                    ProgressView("正在加载话廊")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if case let .failed(message) = feedState.status, feedState.posters.isEmpty {
                 ContentUnavailableView {
@@ -197,6 +245,12 @@ private struct GalleryFeedView: View {
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
                         .onAppear {
+                            if prefetchTriggerPosterIDs.contains(poster.id) {
+                                Task {
+                                    await onPrefetch(poster)
+                                }
+                            }
+                            guard poster.id == visiblePosters.last?.id else { return }
                             Task {
                                 await onLoadMore(poster)
                             }
@@ -235,7 +289,7 @@ private struct GalleryFeedView: View {
                 )
             }
             .presentationDetents([.large])
-            .presentationDragIndicator(.visible)
+            .presentationDragIndicator(.hidden)
         }
         .fullScreenCover(item: $imageViewer) { viewer in
             GalleryImageViewer(viewer: viewer)
@@ -258,6 +312,11 @@ private struct GalleryFeedView: View {
 
     private var visiblePosters: [GalleryPoster] {
         feedState.posters.filter { !deletedPosterIDs.contains($0.id) }
+    }
+
+    private var prefetchTriggerPosterIDs: Set<Int> {
+        guard prefetchTriggerThreshold > 0 else { return [] }
+        return Set(visiblePosters.suffix(prefetchTriggerThreshold).map(\.id))
     }
 
     private func applyReport(_ context: GalleryReportContext, type: CommunityReportType, note: String) {
@@ -407,19 +466,16 @@ private struct GalleryAvatarView: View {
     let imageURL: URL?
 
     var body: some View {
-        AsyncImage(url: imageURL) { phase in
-            switch phase {
-            case let .success(image):
-                image
-                    .resizable()
-                    .scaledToFill()
-            default:
-                ZStack {
-                    Circle().fill(Color.orange.opacity(0.15))
-                    Image(systemName: "person.fill")
-                        .foregroundStyle(.orange)
-                        .font(.caption.weight(.bold))
-                }
+        CachedRemoteImage(url: imageURL) { image in
+            image
+                .resizable()
+                .scaledToFill()
+        } placeholder: {
+            ZStack {
+                Circle().fill(Color.orange.opacity(0.15))
+                Image(systemName: "person.fill")
+                    .foregroundStyle(.orange)
+                    .font(.caption.weight(.bold))
             }
         }
         .frame(width: 34, height: 34)
@@ -500,12 +556,18 @@ private struct GalleryPosterThumbnail: View {
 
 /// 帖子详情页。
 struct GalleryPosterDetailView: View {
+    private struct UserRoute: Identifiable, Hashable {
+        let userID: Int
+        var id: Int { userID }
+    }
+
     @ObservedObject private var settings = AppSettingsStore.shared
     private let reportService = CommunityReportService()
     @StateObject private var viewModel: GalleryPosterDetailViewModel
     @State private var imageViewer: GalleryImageViewerState?
     @State private var reportContext: GalleryReportContext?
     @State private var composerTarget: GalleryCommentComposerTarget?
+    @State private var userRoute: UserRoute?
     @State private var isShowingDeleteConfirmation = false
     let onReport: ((CommunityReportAction) -> Void)?
     let onDeleted: (@Sendable () async -> Void)?
@@ -532,19 +594,17 @@ struct GalleryPosterDetailView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                     HStack(spacing: 12) {
-                        GalleryAvatarView(imageURL: URL(string: viewModel.poster.user.avatar.lowUrl.isEmpty ? viewModel.poster.user.avatar.url : viewModel.poster.user.avatar.lowUrl))
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(viewModel.poster.user.nickname)
-                                .font(.headline)
-                            HStack(spacing: 8) {
-                                Text(relativeTimeText(viewModel.poster.editTime))
-                                if !viewModel.poster.public {
-                                    Label("仅自己可见", systemImage: "eye.slash")
+                        Group {
+                            if canOpenPosterUserProfile {
+                                Button {
+                                    userRoute = UserRoute(userID: viewModel.poster.user.id)
+                                } label: {
+                                    authorSummary
                                 }
+                                .buttonStyle(.plain)
+                            } else {
+                                authorSummary
                             }
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                         }
 
                         Spacer()
@@ -662,6 +722,10 @@ struct GalleryPosterDetailView: View {
                     onOpenImage: { index, images in
                         imageViewer = GalleryImageViewerState(images: images, initialIndex: index)
                     },
+                    onOpenUser: { user in
+                        guard user.id > 0 else { return }
+                        userRoute = UserRoute(userID: user.id)
+                    },
                     onLoadMore: { comment in
                         await viewModel.loadMoreCommentsIfNeeded(currentComment: comment)
                     }
@@ -676,6 +740,9 @@ struct GalleryPosterDetailView: View {
         .background(Color(.systemGroupedBackground))
         .navigationTitle("帖子详情")
         .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(item: $userRoute) { route in
+            UserProfileRootView(userID: route.userID)
+        }
         .toolbar {
             if onReport != nil || viewModel.poster.own {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -730,6 +797,29 @@ struct GalleryPosterDetailView: View {
         }
     }
 
+    private var authorSummary: some View {
+        HStack(spacing: 12) {
+            GalleryAvatarView(imageURL: URL(string: viewModel.poster.user.avatar.lowUrl.isEmpty ? viewModel.poster.user.avatar.url : viewModel.poster.user.avatar.lowUrl))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(viewModel.poster.user.nickname)
+                    .font(.headline)
+                HStack(spacing: 8) {
+                    Text(relativeTimeText(viewModel.poster.editTime))
+                    if !viewModel.poster.public {
+                        Label("仅自己可见", systemImage: "eye.slash")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var canOpenPosterUserProfile: Bool {
+        !viewModel.poster.anonymous && viewModel.poster.user.id > 0
+    }
+
     private func relativeTimeText(_ string: String) -> String {
         GalleryDateDecoder.relativeText(from: string, fallback: "未知时间")
     }
@@ -778,6 +868,7 @@ private struct GalleryPosterCommentsSection: View {
     let onReply: (GalleryCommentReplyTarget) -> Void
     let onLikeComment: (GalleryComment) -> Void
     let onOpenImage: (Int, [GalleryImage]) -> Void
+    let onOpenUser: (GalleryUser) -> Void
     let onLoadMore: @Sendable (GalleryComment?) async -> Void
 
     var body: some View {
@@ -827,7 +918,8 @@ private struct GalleryPosterCommentsSection: View {
                                     likingCommentIDs: likingCommentIDs,
                                     onReply: onReply,
                                     onLikeComment: onLikeComment,
-                                    onOpenImage: onOpenImage
+                                    onOpenImage: onOpenImage,
+                                    onOpenUser: onOpenUser
                                 )
 
                                 if index != comments.count - 1 {
@@ -875,6 +967,7 @@ private struct GalleryCommentRow: View {
     let onReply: (GalleryCommentReplyTarget) -> Void
     let onLikeComment: (GalleryComment) -> Void
     let onOpenImage: (Int, [GalleryImage]) -> Void
+    let onOpenUser: (GalleryUser) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -888,7 +981,10 @@ private struct GalleryCommentRow: View {
                 onLike: {
                     onLikeComment(comment)
                 },
-                onOpenImage: onOpenImage
+                onOpenImage: onOpenImage,
+                onOpenUser: {
+                    onOpenUser(comment.user)
+                }
             )
 
             if !comment.sub.isEmpty {
@@ -905,7 +1001,10 @@ private struct GalleryCommentRow: View {
                                 onLike: {
                                     onLikeComment(subComment)
                                 },
-                                onOpenImage: onOpenImage
+                                onOpenImage: onOpenImage,
+                                onOpenUser: {
+                                    onOpenUser(subComment.user)
+                                }
                             )
 
                             if index != comment.sub.count - 1 {
@@ -932,17 +1031,39 @@ private struct GalleryCommentBubble: View {
     let onReply: () -> Void
     let onLike: () -> Void
     let onOpenImage: (Int, [GalleryImage]) -> Void
+    let onOpenUser: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            GalleryAvatarView(imageURL: URL(string: comment.user.avatar.lowUrl.isEmpty ? comment.user.avatar.url : comment.user.avatar.lowUrl))
-                .frame(width: isSubComment ? 28 : 34, height: isSubComment ? 28 : 34)
+            Group {
+                if canOpenUserProfile {
+                    Button(action: onOpenUser) {
+                        GalleryAvatarView(imageURL: URL(string: comment.user.avatar.lowUrl.isEmpty ? comment.user.avatar.url : comment.user.avatar.lowUrl))
+                            .frame(width: isSubComment ? 28 : 34, height: isSubComment ? 28 : 34)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    GalleryAvatarView(imageURL: URL(string: comment.user.avatar.lowUrl.isEmpty ? comment.user.avatar.url : comment.user.avatar.lowUrl))
+                        .frame(width: isSubComment ? 28 : 34, height: isSubComment ? 28 : 34)
+                }
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(comment.user.nickname)
-                        .font(isSubComment ? .subheadline.weight(.semibold) : .headline)
-                        .lineLimit(1)
+                    Group {
+                        if canOpenUserProfile {
+                            Button(action: onOpenUser) {
+                                Text(comment.user.nickname)
+                                    .font(isSubComment ? .subheadline.weight(.semibold) : .headline)
+                                    .lineLimit(1)
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            Text(comment.user.nickname)
+                                .font(isSubComment ? .subheadline.weight(.semibold) : .headline)
+                                .lineLimit(1)
+                        }
+                    }
 
                     Spacer(minLength: 0)
 
@@ -982,6 +1103,10 @@ private struct GalleryCommentBubble: View {
         }
         .contentShape(Rectangle())
         .onTapGesture(perform: onReply)
+    }
+
+    private var canOpenUserProfile: Bool {
+        !comment.anonymous && comment.user.id > 0
     }
 
     @ViewBuilder
@@ -1061,9 +1186,11 @@ private struct GallerySearchView: View {
         GalleryFeedView(
             feedState: filteredSearchState,
             feedIdentity: "search",
+            prefetchTriggerThreshold: 0,
             onRefresh: {
                 await viewModel.performSearch()
             },
+            onPrefetch: { _ in },
             onLoadMore: { poster in
                 await viewModel.loadMoreSearchResultsIfNeeded(currentPoster: poster)
             }
@@ -1097,6 +1224,293 @@ private struct GallerySearchView: View {
         var state = viewModel.searchState
         state.posters = CommunityModeration.filterVisiblePosters(state.posters, snapshot: settings.snapshot)
         return state
+    }
+}
+
+/// 原生消息页。
+///
+/// Android 虽然最终落到网页，但后端已经提供独立消息接口，因此 iOS 直接走 native list。
+private struct GalleryMessagesView: View {
+    @ObservedObject var viewModel: GalleryMessageViewModel
+    @State private var selectedPoster: GalleryPoster?
+    @State private var localAlert: LoginAlert?
+    private let service = GalleryService()
+
+    var body: some View {
+        ZStack {
+            Color(.systemGroupedBackground)
+                .ignoresSafeArea()
+
+            Group {
+                if isInitialLoading {
+                    ProgressView("正在加载消息")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if case let .failed(message) = currentState.status, currentState.items.isEmpty {
+                    ContentUnavailableView {
+                        Label("加载消息失败", systemImage: "bell.badge")
+                    } description: {
+                        Text(message)
+                    }
+                } else {
+                    List {
+                        ForEach(Array(currentState.items.enumerated()), id: \.element.id) { index, message in
+                        VStack(spacing: 0) {
+                            GalleryMessageRow(
+                                type: viewModel.selectedType,
+                                message: message,
+                                isUnread: viewModel.isUnread(message, in: viewModel.selectedType),
+                                onOpenPoster: {
+                                    Task {
+                                        await openMessage(message)
+                                    }
+                                }
+                            )
+
+                                if index != currentState.items.count - 1 {
+                                    Divider()
+                                        .padding(.leading, 52)
+                                }
+                            }
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                            .onAppear {
+                                Task {
+                                    await viewModel.loadMoreIfNeeded(for: viewModel.selectedType, currentMessage: message)
+                                }
+                            }
+                        }
+
+                        if currentState.isLoadingMore {
+                            HStack {
+                                Spacer()
+                                ProgressView()
+                                Spacer()
+                            }
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                        }
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .background(Color(.systemGroupedBackground))
+                    .refreshable {
+                        await viewModel.refreshSelectedType()
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .contentShape(Rectangle())
+        .simultaneousGesture(messageSwitchGesture)
+        .navigationTitle("消息")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("全部已读") {
+                    viewModel.markCurrentTypeAsRead()
+                }
+                .disabled(!viewModel.hasUnreadInCurrentType)
+            }
+        }
+        .safeAreaInset(edge: .top) {
+            Picker("消息分类", selection: $viewModel.selectedType) {
+                ForEach(GalleryMessageType.allCases) { type in
+                    Text(title(for: type)).tag(type)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
+            .background(Color(.systemGroupedBackground))
+        }
+        .task {
+            await viewModel.bootstrapIfNeeded()
+        }
+        .onChange(of: viewModel.selectedType) { _, newType in
+            if viewModel.state(for: newType).status == .idle {
+                Task {
+                    await viewModel.refresh(type: newType)
+                }
+            }
+        }
+        .sheet(item: $selectedPoster) { poster in
+            NavigationStack {
+                GalleryPosterDetailView(poster: poster)
+            }
+            .presentationDetents([.large])
+            .presentationDragIndicator(.hidden)
+        }
+        .alert(item: $viewModel.alert) { alert in
+            Alert(
+                title: Text(alert.title),
+                message: Text(alert.message),
+                dismissButton: .default(Text("知道了"))
+            )
+        }
+        .alert(item: $localAlert) { alert in
+            Alert(
+                title: Text(alert.title),
+                message: Text(alert.message),
+                dismissButton: .default(Text("知道了"))
+            )
+        }
+    }
+
+    private var currentState: GalleryMessageListState {
+        viewModel.state(for: viewModel.selectedType)
+    }
+
+    private var isInitialLoading: Bool {
+        switch currentState.status {
+        case .idle, .loading:
+            return currentState.items.isEmpty
+        default:
+            return false
+        }
+    }
+
+    private var messageSwitchGesture: some Gesture {
+        DragGesture(minimumDistance: 24, coordinateSpace: .local)
+            .onEnded { value in
+                let horizontal = value.translation.width
+                let vertical = value.translation.height
+
+                guard abs(horizontal) > abs(vertical), abs(horizontal) >= 56 else { return }
+
+                if horizontal < 0 {
+                    switchType(step: 1)
+                } else {
+                    switchType(step: -1)
+                }
+            }
+    }
+
+    private func title(for type: GalleryMessageType) -> String {
+        let unread = viewModel.unreadCount(for: type)
+        guard unread > 0 else { return type.title }
+        return unread > 99 ? "\(type.title) 99+" : "\(type.title) \(unread)"
+    }
+
+    private func switchType(step: Int) {
+        let allTypes = GalleryMessageType.allCases
+        guard let currentIndex = allTypes.firstIndex(of: viewModel.selectedType) else { return }
+
+        let nextIndex = currentIndex + step
+        guard allTypes.indices.contains(nextIndex) else { return }
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            viewModel.selectedType = allTypes[nextIndex]
+        }
+    }
+
+    private func openMessage(_ message: GalleryMessage) async {
+        viewModel.markMessageAsRead(message, in: viewModel.selectedType)
+
+        guard let posterID = message.linkedPosterID else { return }
+
+        do {
+            let poster = try await service.fetchPoster(id: posterID)
+            selectedPoster = poster.asPoster
+        } catch {
+            if error is CancellationError {
+                return
+            }
+            localAlert = LoginAlert(title: "无法打开", message: "相关帖子不存在或已删除。")
+        }
+    }
+}
+
+/// 单条消息行。
+private struct GalleryMessageRow: View {
+    let type: GalleryMessageType
+    let message: GalleryMessage
+    let isUnread: Bool
+    let onOpenPoster: () -> Void
+
+    private var canOpenPoster: Bool {
+        message.linkedPosterID != nil
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            GalleryMessageAvatarView(user: message.fromUser, type: type)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if isUnread {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: 7, height: 7)
+                    }
+
+                    Text(message.fromUser.displayName)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 0)
+
+                    Text(relativeTimeText(message.updateTime))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Text(type.actionText(for: message))
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+
+                if !message.text.isEmpty {
+                    Text(message.text)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            if canOpenPoster {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 2)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isUnread ? Color.orange.opacity(0.06) : Color(.systemBackground))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard canOpenPoster else { return }
+            onOpenPoster()
+        }
+    }
+
+    private func relativeTimeText(_ string: String) -> String {
+        GalleryDateDecoder.relativeText(from: string, fallback: "未知时间")
+    }
+}
+
+/// 消息头像。
+private struct GalleryMessageAvatarView: View {
+    let user: GalleryMessageUser
+    let type: GalleryMessageType
+
+    var body: some View {
+        if user.id == 0 {
+            ZStack {
+                Circle().fill(Color.orange.opacity(0.12))
+                Image(systemName: type == .system ? "bell.fill" : "person.fill")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.orange)
+            }
+            .frame(width: 34, height: 34)
+        } else {
+            GalleryAvatarView(imageURL: user.avatar.preferredURL)
+        }
     }
 }
 

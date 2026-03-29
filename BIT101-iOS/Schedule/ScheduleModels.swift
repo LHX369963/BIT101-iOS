@@ -230,7 +230,7 @@ struct ScheduleCache: Codable {
     var selectedClassroomSectionIDs: [Int] = []
     var showSaturday = true
     var showSunday = true
-    var showBorder = false
+    var showBorder = true
     var showHighlightToday = true
     var showDivider = true
     var showCurrentTime = true
@@ -288,7 +288,7 @@ struct ScheduleCache: Codable {
         selectedClassroomSectionIDs = try container.decodeIfPresent([Int].self, forKey: .selectedClassroomSectionIDs) ?? []
         showSaturday = try container.decodeIfPresent(Bool.self, forKey: .showSaturday) ?? true
         showSunday = try container.decodeIfPresent(Bool.self, forKey: .showSunday) ?? true
-        showBorder = try container.decodeIfPresent(Bool.self, forKey: .showBorder) ?? false
+        showBorder = try container.decodeIfPresent(Bool.self, forKey: .showBorder) ?? true
         showHighlightToday = try container.decodeIfPresent(Bool.self, forKey: .showHighlightToday) ?? true
         showDivider = try container.decodeIfPresent(Bool.self, forKey: .showDivider) ?? true
         showCurrentTime = try container.decodeIfPresent(Bool.self, forKey: .showCurrentTime) ?? true

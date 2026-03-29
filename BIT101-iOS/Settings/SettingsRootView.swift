@@ -52,7 +52,7 @@ enum SettingsRoute: String, CaseIterable, Identifiable {
         case .theme: return "外观设置"
         case .calendar: return "课程表设置"
         case .ddl: return "DDL设置"
-        case .gallery: return "画廊设置"
+        case .gallery: return "话廊设置"
         case .about: return "关于"
         }
     }
@@ -64,7 +64,7 @@ enum SettingsRoute: String, CaseIterable, Identifiable {
         case .theme: return "主题及暗黑模式"
         case .calendar: return "课程表数据及显示方式"
         case .ddl: return "日程数据及显示方式"
-        case .gallery: return "画廊数据及显示方式"
+        case .gallery: return "话廊数据及显示方式"
         case .about: return "关于 BIT101"
         }
     }
@@ -209,13 +209,10 @@ private struct AccountSettingsPage: View {
                         Text("头像")
                         Spacer()
                         PhotosPicker(selection: $selectedPhoto, matching: .images) {
-                            AsyncImage(url: URL(string: profile.user.avatar.url)) { phase in
-                                switch phase {
-                                case let .success(image):
-                                    image.resizable().scaledToFill()
-                                default:
-                                    Circle().fill(Color.blue.opacity(0.15))
-                                }
+                            CachedRemoteImage(url: URL(string: profile.user.avatar.url)) { image in
+                                image.resizable().scaledToFill()
+                            } placeholder: {
+                                Circle().fill(Color.blue.opacity(0.15))
                             }
                             .frame(width: 40, height: 40)
                             .clipShape(Circle())
@@ -480,12 +477,7 @@ private struct ThemeSettingsPage: View {
     var body: some View {
         Form {
             Section {
-                Toggle("动态适配系统主题", isOn: Binding(
-                    get: { settings.dynamicTheme },
-                    set: settings.setDynamicTheme
-                ))
-
-                Picker("暗黑模式", selection: Binding(
+                Picker("外观模式", selection: Binding(
                     get: { settings.themeMode },
                     set: settings.setThemeMode
                 )) {
@@ -668,7 +660,7 @@ private struct DDLSettingsPage: View {
     }
 }
 
-/// 话题设置页。
+/// 画廊设置页。
 ///
 /// 集中管理本地黑名单、隐藏帖子、社区规则状态以及相关联系信息。
 private struct GallerySettingsPage: View {
@@ -681,17 +673,7 @@ private struct GallerySettingsPage: View {
 
     var body: some View {
         List {
-            Section("屏蔽设置") {
-                Toggle("在话廊中隐藏机器人 Poster", isOn: Binding(
-                    get: { settings.galleryHideBotPoster },
-                    set: { settings.updateGallerySettings(hideBotPoster: $0) }
-                ))
-                Toggle("也隐藏搜索栏中的机器人 Poster", isOn: Binding(
-                    get: { settings.galleryHideBotPosterInSearch },
-                    set: { settings.updateGallerySettings(hideBotPosterInSearch: $0) }
-                ))
-                .disabled(!settings.galleryHideBotPoster)
-
+            Section {
                 NavigationLink {
                     HiddenUsersPage(hiddenUsers: hiddenUsers, isLoading: isLoadingUsers) { index in
                         settings.removeHiddenUser(at: index + (settings.galleryHiddenUserIDs.first == -1 ? 1 : 0))
@@ -724,21 +706,25 @@ private struct GallerySettingsPage: View {
                     set: { _ in settings.toggleHideAnonymous() }
                 ))
 
-                Toggle("严格模式", isOn: Binding(
+                Toggle("严格屏蔽模式", isOn: Binding(
                     get: { settings.galleryHideStrictMode },
                     set: { settings.updateGallerySettings(hideStrictMode: $0) }
                 ))
+            } header: {
+                Text("屏蔽设置")
+            } footer: {
+                Text("开启后，如果一条评论是在回复已屏蔽用户，也会一并隐藏。")
             }
 
-            Section("浏览设置") {
-                Toggle("允许横向滑动", isOn: Binding(
-                    get: { settings.galleryAllowHorizontalScroll },
-                    set: { settings.updateGallerySettings(allowHorizontalScroll: $0) }
+            Section("机器人") {
+                Toggle("在搜索结果中隐藏机器人帖子", isOn: Binding(
+                    get: { settings.galleryHideBotPosterInSearch },
+                    set: { settings.updateGallerySettings(hideBotPosterInSearch: $0) }
                 ))
             }
 
             Section("社区治理") {
-                Text(settings.hasAcceptedCurrentCommunityRules ? "当前设备已同意最新社区规则。" : "当前设备尚未同意社区规则，首次进入话题时会弹出提示。")
+                Text(settings.hasAcceptedCurrentCommunityRules ? "当前设备已同意最新社区规则。" : "当前设备尚未同意社区规则，首次进入话廊时会弹出提示。")
                     .foregroundStyle(.secondary)
                 Text("联系邮箱：\(CommunitySupport.email)")
                     .textSelection(.enabled)
@@ -810,7 +796,7 @@ private struct AboutSettingsPage: View {
 
                 NavigationLink("关于 BIT101") {
                     ScrollView {
-                        Text("BIT101 当前已接入设置页、课表、DDL、空教室、地图、话题、成绩、我的等基础能力，后续会继续完善体验与细节。")
+                        Text("BIT101 当前已接入设置页、课表、DDL、空教室、地图、话廊、成绩、我的等基础能力，后续会继续完善体验与细节。")
                             .padding()
                     }
                     .navigationTitle("关于 BIT101")
@@ -961,13 +947,10 @@ private struct HiddenUsersPage: View {
             } else {
                 ForEach(Array(hiddenUsers.enumerated()), id: \.element.user.id) { index, info in
                     HStack(spacing: 12) {
-                        AsyncImage(url: URL(string: info.user.avatar.lowUrl.isEmpty ? info.user.avatar.url : info.user.avatar.lowUrl)) { phase in
-                            switch phase {
-                            case let .success(image):
-                                image.resizable().scaledToFill()
-                            default:
-                                Circle().fill(Color.blue.opacity(0.15))
-                            }
+                        CachedRemoteImage(url: URL(string: info.user.avatar.lowUrl.isEmpty ? info.user.avatar.url : info.user.avatar.lowUrl)) { image in
+                            image.resizable().scaledToFill()
+                        } placeholder: {
+                            Circle().fill(Color.blue.opacity(0.15))
                         }
                         .frame(width: 44, height: 44)
                         .clipShape(Circle())

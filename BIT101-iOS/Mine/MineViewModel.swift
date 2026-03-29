@@ -243,3 +243,165 @@ final class MineViewModel: ObservableObject {
         return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
     }
 }
+
+@MainActor
+/// 他人主页状态机。
+///
+/// 负责拉取指定用户的公开资料和帖子列表，供话题详情里的“查看主页”复用。
+final class UserProfileViewModel: ObservableObject {
+    @Published private(set) var userInfo: MineUserInfo?
+    @Published private(set) var profileStatus: MineLoadStatus = .idle
+    @Published private(set) var posterState = MinePagedState<GalleryPoster>()
+    @Published var alert: LoginAlert?
+
+    private let userID: Int
+    private let service: MineService
+    private var hasBootstrapped = false
+
+    init(userID: Int, service: MineService) {
+        self.userID = userID
+        self.service = service
+    }
+
+    convenience init(userID: Int) {
+        self.init(userID: userID, service: MineService())
+    }
+
+    /// 首次进入主页时预加载资料和第一页帖子。
+    func bootstrapIfNeeded() async {
+        guard !hasBootstrapped else { return }
+        hasBootstrapped = true
+        await refreshAll()
+    }
+
+    /// 资料卡里展示的帖子数摘要。
+    var posterCountText: String {
+        switch posterState.status {
+        case .idle, .loading:
+            return "..."
+        case .loaded:
+            return posterState.canLoadMore ? "\(posterState.items.count)+" : "\(posterState.items.count)"
+        case .failed:
+            return "0"
+        }
+    }
+
+    /// 同时刷新资料卡和帖子列表。
+    func refreshAll() async {
+        async let infoTask: Void = refreshProfile()
+        async let posterTask: Void = refreshPosters()
+        _ = await (infoTask, posterTask)
+    }
+
+    /// 刷新指定用户资料卡。
+    func refreshProfile() async {
+        let hadUserInfo = userInfo != nil || profileStatus == .loaded
+        if !hadUserInfo {
+            profileStatus = .loading
+        }
+
+        do {
+            userInfo = try await service.fetchUserInfo(id: userID)
+            profileStatus = .loaded
+        } catch {
+            if isCancellation(error) {
+                profileStatus = hadUserInfo ? .loaded : .idle
+                return
+            }
+
+            if hadUserInfo {
+                profileStatus = .loaded
+                alert = LoginAlert(title: "刷新主页失败", message: error.localizedDescription)
+                return
+            }
+
+            userInfo = nil
+            profileStatus = .failed(error.localizedDescription)
+            alert = LoginAlert(title: "加载主页失败", message: error.localizedDescription)
+        }
+    }
+
+    /// 刷新指定用户帖子列表第一页。
+    func refreshPosters() async {
+        let hadPosters = !posterState.items.isEmpty || posterState.status == .loaded
+        if !hadPosters {
+            posterState.status = .loading
+            posterState.items = []
+            posterState.nextPage = 0
+            posterState.canLoadMore = true
+            posterState.isLoadingMore = false
+        }
+
+        do {
+            let posters = try await service.fetchUserPosters(userID: userID, page: 0)
+            posterState.items = posters
+            posterState.status = .loaded
+            posterState.nextPage = 1
+            posterState.canLoadMore = !posters.isEmpty
+            posterState.isLoadingMore = false
+        } catch {
+            posterState.isLoadingMore = false
+
+            if isCancellation(error) {
+                posterState.status = hadPosters ? .loaded : .idle
+                return
+            }
+
+            if hadPosters {
+                posterState.status = .loaded
+                alert = LoginAlert(title: "刷新帖子失败", message: error.localizedDescription)
+                return
+            }
+
+            posterState.status = .failed(error.localizedDescription)
+            posterState.canLoadMore = false
+            alert = LoginAlert(title: "加载帖子失败", message: error.localizedDescription)
+        }
+    }
+
+    /// 指定用户帖子列表分页加载。
+    func loadMorePostersIfNeeded(currentPoster: GalleryPoster?) async {
+        guard let currentPoster else { return }
+        guard shouldLoadMore(currentID: currentPoster.id, state: posterState) else { return }
+
+        posterState.isLoadingMore = true
+        do {
+            let posters = try await service.fetchUserPosters(userID: userID, page: posterState.nextPage)
+            posterState.items.append(contentsOf: posters)
+            posterState.nextPage += 1
+            posterState.isLoadingMore = false
+            posterState.canLoadMore = !posters.isEmpty
+        } catch {
+            posterState.isLoadingMore = false
+            alert = LoginAlert(title: "加载更多失败", message: error.localizedDescription)
+        }
+    }
+
+    /// 判断当前滚动位置是否已经接近列表尾部，可以触发下一页。
+    private func shouldLoadMore<T: Identifiable>(currentID: T.ID, state: MinePagedState<T>) -> Bool where T.ID: Equatable {
+        guard
+            state.status == .loaded,
+            !state.isLoadingMore,
+            state.canLoadMore,
+            state.items.suffix(4).contains(where: { $0.id == currentID })
+        else {
+            return false
+        }
+
+        return true
+    }
+
+    /// 同时兼容 Swift Concurrency 与 URLSession 的取消错误。
+    private func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+
+        if let urlError = error as? URLError, urlError.code == .cancelled {
+            return true
+        }
+
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+    }
+}

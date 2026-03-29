@@ -16,11 +16,27 @@ enum GalleryServiceError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notLoggedIn:
-            return "当前登录状态无效，请重新登录后再查看话题。"
+            return "当前登录状态无效，请重新登录后再查看话廊。"
         case .invalidResponse:
             return "服务器返回了无法识别的数据。"
         }
     }
+}
+
+/// 机器人分栏的分页结果。
+struct GalleryBotFeedBatch {
+    let posters: [GalleryPoster]
+    let nextSourcePage: Int
+    let canLoadMore: Bool
+}
+
+/// 推荐分栏的分页结果。
+///
+/// 推荐流会额外跳过那些“服务端返回了内容，但本地过滤后为空”的页，避免列表错误地停在半路。
+struct GalleryRecommendFeedBatch {
+    let posters: [GalleryPoster]
+    let nextSourcePage: Int
+    let canLoadMore: Bool
 }
 
 /// 话题模块网络层。
@@ -98,24 +114,103 @@ struct GalleryService {
 
     /// 拉取某个 feed 的帖子列表。
     func fetchFeed(kind: GalleryFeedKind, page: Int?) async throws -> [GalleryPoster] {
-        try await fetchPosters(
+        if kind.isBotFeed {
+            let batch = try await fetchBotFeed(startPage: page ?? 0)
+            return batch.posters
+        }
+
+        return try await fetchPosters(
             mode: kind.requestMode,
             order: kind.requestOrder,
             search: nil,
             uid: kind.requestUID,
-            page: page
+            page: page,
+            hideBot: true
+        )
+    }
+
+    /// 推荐流在本地还会过滤机器人帖子，因此可能出现“某一页服务端有内容，但过滤后整页为空”。
+    ///
+    /// 这里向后多扫几页，直到拿到可展示内容或确认后端已经没有更多数据，避免推荐列表错误停止分页。
+    func fetchRecommendFeed(startPage: Int) async throws -> GalleryRecommendFeedBatch {
+        var sourcePage = startPage
+        var collected: [GalleryPoster] = []
+        var canLoadMore = true
+        let maxScanCount = 6
+
+        for _ in 0 ..< maxScanCount where canLoadMore && collected.count < 10 {
+            let rawPosters = try await fetchRawPosters(
+                mode: nil,
+                order: nil,
+                search: nil,
+                uid: nil,
+                page: sourcePage == 0 ? nil : sourcePage,
+                hideBot: true
+            )
+            collected.append(contentsOf: applyBotFilterIfNeeded(rawPosters, hideBot: true))
+            canLoadMore = !rawPosters.isEmpty
+            sourcePage += 1
+        }
+
+        return GalleryRecommendFeedBatch(
+            posters: collected,
+            nextSourcePage: sourcePage,
+            canLoadMore: canLoadMore
         )
     }
 
     /// 根据搜索关键词和排序条件查询帖子。
     func searchPosters(query: GallerySearchQuery, page: Int?) async throws -> [GalleryPoster] {
-        try await fetchPosters(
+        let settings = await MainActor.run {
+            AppSettingsStore.loadSnapshotFromDefaults() ?? AppSettingsSnapshot()
+        }
+        return try await fetchPosters(
             mode: "search",
             order: query.order.rawValue,
             search: query.text.trimmingCharacters(in: .whitespacesAndNewlines),
             uid: -1,
-            page: page
+            page: page,
+            hideBot: settings.galleryHideBotPosterInSearch
         )
+    }
+
+    /// 机器人分栏不是服务端原生 feed，这里从“最新”帖子流里向后多抓几页，再筛出机器人帖子。
+    func fetchBotFeed(startPage: Int) async throws -> GalleryBotFeedBatch {
+        var sourcePage = startPage
+        var collected: [GalleryPoster] = []
+        var canLoadMore = true
+        let maxScanCount = 5
+
+        for _ in 0 ..< maxScanCount where canLoadMore && collected.count < 12 {
+            let posters = try await fetchPosters(
+                mode: "search",
+                order: "new",
+                search: nil,
+                uid: -1,
+                page: sourcePage == 0 ? nil : sourcePage,
+                hideBot: false
+            )
+            collected.append(contentsOf: posters.filter { CommunityModeration.isBotPoster(tags: $0.tags) })
+            canLoadMore = !posters.isEmpty
+            sourcePage += 1
+        }
+
+        return GalleryBotFeedBatch(
+            posters: collected,
+            nextSourcePage: sourcePage,
+            canLoadMore: canLoadMore
+        )
+    }
+
+    /// 后端虽然支持 `hide_bot` 参数，但当前服务端过滤实现会漏掉机器人帖子。
+    ///
+    /// iOS 侧在保留服务端参数的同时，再补一层本地兜底，确保普通分栏不会混入机器人帖子。
+    private func applyBotFilterIfNeeded(_ posters: [GalleryPoster], hideBot: Bool) -> [GalleryPoster] {
+        guard hideBot else {
+            return posters
+        }
+
+        return posters.filter { !CommunityModeration.isBotPoster(tags: $0.tags) }
     }
 
     /// 获取可选的帖子 claim 列表。
@@ -262,22 +357,54 @@ struct GalleryService {
         )
     }
 
+    /// 获取消息中心各分类的未读数。
+    func fetchMessageUnreadCounts() async throws -> GalleryMessageUnreadCounts {
+        try await sendJSONRequest(path: "messages/unread_nums")
+    }
+
+    /// 拉取某个消息分类的列表。
+    ///
+    /// 后端使用 `last_id` 做历史分页；首次传空会顺手把该分类未读数清零。
+    func fetchMessages(type: GalleryMessageType, lastID: Int?) async throws -> [GalleryMessage] {
+        var queryItems = [URLQueryItem(name: "type", value: type.rawValue)]
+        if let lastID {
+            queryItems.append(URLQueryItem(name: "last_id", value: String(lastID)))
+        }
+        return try await sendJSONRequest(path: "messages", queryItems: queryItems)
+    }
+
     /// 统一拼装帖子流接口参数。
     private func fetchPosters(
         mode: String?,
         order: String?,
         search: String?,
         uid: Int?,
-        page: Int?
+        page: Int?,
+        hideBot: Bool
+    ) async throws -> [GalleryPoster] {
+        let posters = try await fetchRawPosters(
+            mode: mode,
+            order: order,
+            search: search,
+            uid: uid,
+            page: page,
+            hideBot: hideBot
+        )
+        return applyBotFilterIfNeeded(posters, hideBot: hideBot)
+    }
+
+    /// 发起原始帖子流请求，不做客户端过滤，供更高层组合推荐/机器人等特殊分页语义。
+    private func fetchRawPosters(
+        mode: String?,
+        order: String?,
+        search: String?,
+        uid: Int?,
+        page: Int?,
+        hideBot: Bool
     ) async throws -> [GalleryPoster] {
         let fakeCookie = storage.fakeCookie
         guard !fakeCookie.isEmpty else {
             throw GalleryServiceError.notLoggedIn
-        }
-
-        // 话题页的若干过滤开关是设置中心全局配置，所以这里按最新快照拼请求。
-        let settings = await MainActor.run {
-            AppSettingsStore.loadSnapshotFromDefaults() ?? AppSettingsSnapshot()
         }
         var components = URLComponents(url: baseURL.appending(path: "posters"), resolvingAgainstBaseURL: false)
         var queryItems: [URLQueryItem] = []
@@ -302,8 +429,7 @@ struct GalleryService {
             queryItems.append(URLQueryItem(name: "uid", value: String(uid)))
         }
 
-        let shouldHideBot = settings.galleryHideBotPoster && (mode != "search" || settings.galleryHideBotPosterInSearch)
-        if shouldHideBot {
+        if hideBot {
             queryItems.append(URLQueryItem(name: "hide_bot", value: "true"))
         }
 

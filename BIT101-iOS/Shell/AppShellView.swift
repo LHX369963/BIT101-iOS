@@ -30,7 +30,7 @@ enum AppTab: String, CaseIterable, Identifiable, Codable {
         case .score:
             return "成绩"
         case .gallery:
-            return "话题"
+            return "话廊"
         case .mine:
             return "我的"
         }
@@ -193,12 +193,12 @@ private struct GalleryCommunityRulesSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("在继续进入话题前，请确认你已阅读并同意社区规则。")
+                    Text("在继续进入话廊前，请确认你已阅读并同意社区规则。")
                         .font(.headline)
 
                     VStack(alignment: .leading, spacing: 10) {
                         Text("1. 禁止发布政治敏感、色情低俗、辱骂骚扰、隐私泄露、谣言和广告刷屏内容。")
-                        Text("2. 话题内容会在本地进行敏感词过滤，以通过 Apple 审查；命中的帖子会被直接隐藏，因此显示的帖子数量可能会比网页端少。")
+                        Text("2. 话廊内容会在本地进行敏感词过滤，以通过 Apple 审查；命中的帖子会被直接隐藏，因此显示的帖子数量可能会比网页端少。")
                         Text("3. 你可以在帖子菜单中举报并隐藏帖子，或举报并屏蔽用户。")
                         Text("4. 举报信息会异步提交给开发者进行处理。")
                         Text("5. 如需联系开发者，请使用邮箱：\(contactEmail)")
@@ -206,7 +206,7 @@ private struct GalleryCommunityRulesSheet: View {
                     .font(.body)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                    Text("继续使用话题功能即表示你同意遵守以上规则。")
+                    Text("继续使用话廊功能即表示你同意遵守以上规则。")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }

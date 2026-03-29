@@ -7,12 +7,13 @@
 
 import Foundation
 
-/// 话题首页的四种 feed。
+/// 画廊首页的几个 feed。
 enum GalleryFeedKind: String, CaseIterable, Identifiable {
     case follow
     case recommend
     case newest
     case hot
+    case bot
 
     /// 供 `ForEach` 和本地持久化使用的稳定标识。
     var id: String { rawValue }
@@ -28,6 +29,8 @@ enum GalleryFeedKind: String, CaseIterable, Identifiable {
             return "最新"
         case .hot:
             return "最热"
+        case .bot:
+            return "机器人"
         }
     }
 
@@ -44,6 +47,8 @@ enum GalleryFeedKind: String, CaseIterable, Identifiable {
             return "search"
         case .hot:
             return "hot"
+        case .bot:
+            return nil
         }
     }
 
@@ -67,6 +72,11 @@ enum GalleryFeedKind: String, CaseIterable, Identifiable {
         default:
             return nil
         }
+    }
+
+    /// 机器人流不直接依赖后端 feed 语义，而是本地从公开帖子流中筛机器人标签。
+    var isBotFeed: Bool {
+        self == .bot
     }
 }
 
@@ -417,4 +427,248 @@ struct GalleryFeedState {
     var nextPage = 0
     /// 后端是否还有更多内容可翻。
     var canLoadMore = true
+}
+
+/// 消息中心支持的消息类型。
+enum GalleryMessageType: String, CaseIterable, Identifiable {
+    case comment
+    case like
+    case follow
+    case system
+
+    /// 供 `Picker` 和状态字典使用的稳定标识。
+    var id: String { rawValue }
+
+    /// 分段控件展示的中文标题。
+    var title: String {
+        switch self {
+        case .comment:
+            return "评论"
+        case .like:
+            return "点赞"
+        case .follow:
+            return "关注"
+        case .system:
+            return "系统"
+        }
+    }
+
+    /// 当前类型对应的动作文案。
+    func actionText(for message: GalleryMessage) -> String {
+        switch self {
+        case .comment:
+            return message.obj.hasPrefix("comment") ? "回复了你的评论" : "评论了你的帖子"
+        case .like:
+            return message.obj.hasPrefix("comment") ? "点赞了你的评论" : "点赞了你的帖子"
+        case .follow:
+            return "关注了你"
+        case .system:
+            return "系统通知"
+        }
+    }
+}
+
+/// 消息发送者头像。
+///
+/// 消息接口里的 `from_user` 可能为空对象，因此这里单独做成宽松解码。
+struct GalleryMessageAvatar: Decodable, Hashable {
+    let url: String
+    let lowUrl: String
+
+    init(url: String = "", lowUrl: String = "") {
+        self.url = url
+        self.lowUrl = lowUrl
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case url
+        case lowUrl
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        url = try container.decodeIfPresent(String.self, forKey: .url) ?? ""
+        lowUrl = try container.decodeIfPresent(String.self, forKey: .lowUrl) ?? ""
+    }
+
+    /// 优先返回低清地址，失败时回退到原图地址。
+    var preferredURL: URL? {
+        let raw = lowUrl.isEmpty ? url : lowUrl
+        guard !raw.isEmpty else { return nil }
+        return URL(string: raw)
+    }
+}
+
+/// 消息发送者。
+///
+/// 系统消息会返回空用户对象，因此昵称和头像都需要兜底。
+struct GalleryMessageUser: Decodable, Hashable {
+    let id: Int
+    let nickname: String
+    let avatar: GalleryMessageAvatar
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case nickname
+        case avatar
+    }
+
+    init(id: Int = 0, nickname: String = "", avatar: GalleryMessageAvatar = GalleryMessageAvatar()) {
+        self.id = id
+        self.nickname = nickname
+        self.avatar = avatar
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(Int.self, forKey: .id) ?? 0
+        nickname = try container.decodeIfPresent(String.self, forKey: .nickname) ?? ""
+        avatar = try container.decodeIfPresent(GalleryMessageAvatar.self, forKey: .avatar) ?? GalleryMessageAvatar()
+    }
+
+    /// 供消息列表直接展示的发信人名称。
+    var displayName: String {
+        if id == 0 {
+            return "系统消息"
+        }
+        return nickname.isEmpty ? "未知用户" : nickname
+    }
+}
+
+/// 各消息分类未读数。
+struct GalleryMessageUnreadCounts: Decodable, Equatable {
+    var comment: Int
+    var follow: Int
+    var like: Int
+    var system: Int
+
+    init(comment: Int = 0, follow: Int = 0, like: Int = 0, system: Int = 0) {
+        self.comment = comment
+        self.follow = follow
+        self.like = like
+        self.system = system
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case comment
+        case follow
+        case like
+        case system
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        comment = try container.decodeIfPresent(Int.self, forKey: .comment) ?? 0
+        follow = try container.decodeIfPresent(Int.self, forKey: .follow) ?? 0
+        like = try container.decodeIfPresent(Int.self, forKey: .like) ?? 0
+        system = try container.decodeIfPresent(Int.self, forKey: .system) ?? 0
+    }
+
+    /// 统一给悬浮按钮计算红点总数。
+    var total: Int {
+        comment + follow + like + system
+    }
+
+    /// 读取单个消息类型的未读数。
+    func unreadCount(for type: GalleryMessageType) -> Int {
+        switch type {
+        case .comment:
+            return comment
+        case .follow:
+            return follow
+        case .like:
+            return like
+        case .system:
+            return system
+        }
+    }
+}
+
+/// 单条消息模型。
+struct GalleryMessage: Decodable, Identifiable, Hashable {
+    let fromUser: GalleryMessageUser
+    let id: Int
+    let linkObj: String
+    let obj: String
+    let text: String
+    let updateTime: String
+
+    /// 从消息对象里解析目标帖子 ID，供点按消息后跳到帖子详情。
+    var linkedPosterID: Int? {
+        Self.posterID(from: linkObj) ?? Self.posterID(from: obj)
+    }
+
+    private static func posterID(from raw: String) -> Int? {
+        guard raw.hasPrefix("poster") else { return nil }
+        return Int(raw.dropFirst("poster".count))
+    }
+}
+
+/// 单个消息分类的列表状态。
+struct GalleryMessageListState {
+    /// 当前已经加载到客户端的消息列表。
+    var items: [GalleryMessage] = []
+    /// 列表当前所处的加载状态。
+    var status: GalleryFeedStatus = .idle
+    /// 是否正在请求下一页。
+    var isLoadingMore = false
+    /// 下一次分页请求要带的 last_id。
+    var nextLastID: Int?
+    /// 服务端是否还有更多历史消息。
+    var canLoadMore = true
+}
+
+private extension GalleryImage {
+    static var placeholder: GalleryImage {
+        GalleryImage(mid: "", url: "", lowUrl: "")
+    }
+}
+
+private extension GalleryIdentity {
+    static var placeholder: GalleryIdentity {
+        GalleryIdentity(id: 0, color: "#FF9500", text: "", createTime: "", updateTime: "", deleteTime: nil)
+    }
+}
+
+extension GalleryUser {
+    /// 供消息页跳转帖子详情时构造占位卡片。
+    static func placeholder(id: Int = 0, nickname: String = "加载中") -> GalleryUser {
+        GalleryUser(
+            id: id,
+            createTime: "",
+            nickname: nickname,
+            avatar: .placeholder,
+            motto: "",
+            identity: .placeholder
+        )
+    }
+}
+
+extension GalleryClaim {
+    /// 供占位帖子使用的空 claim。
+    static var placeholder: GalleryClaim {
+        GalleryClaim(id: 0, text: "")
+    }
+}
+
+extension GalleryPoster {
+    /// 消息页在还未重新拉取帖子详情前使用的占位帖子。
+    static func placeholder(id: Int, title: String = "正在打开帖子") -> GalleryPoster {
+        GalleryPoster(
+            anonymous: false,
+            claim: .placeholder,
+            commentNum: 0,
+            createTime: "",
+            editTime: "",
+            id: id,
+            images: [],
+            likeNum: 0,
+            public: true,
+            tags: [],
+            text: "",
+            title: title,
+            updateTime: "",
+            user: .placeholder()
+        )
+    }
 }

@@ -153,34 +153,189 @@ struct MineRootView: View {
     }
 }
 
+/// 他人主页。
+///
+/// 复用“我的”页已有资料卡和话题卡片样式，避免再做一套单独的用户页皮肤。
+struct UserProfileRootView: View {
+    let userID: Int
+
+    @StateObject private var viewModel: UserProfileViewModel
+    @ObservedObject private var settings = AppSettingsStore.shared
+    @State private var selectedPoster: GalleryPoster?
+    @State private var imageViewer: GalleryImageViewerState?
+
+    init(userID: Int) {
+        self.userID = userID
+        _viewModel = StateObject(wrappedValue: UserProfileViewModel(userID: userID))
+    }
+
+    var body: some View {
+        List {
+            Section {
+                profileSection
+            }
+
+            Section {
+                posterSection
+            }
+        }
+        .listStyle(.insetGrouped)
+        .refreshable {
+            await viewModel.refreshAll()
+        }
+        .navigationTitle(navigationTitle)
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            await viewModel.bootstrapIfNeeded()
+        }
+        .sheet(item: $selectedPoster) { poster in
+            NavigationStack {
+                GalleryPosterDetailView(poster: poster)
+            }
+            .presentationDetents([.large])
+            .presentationDragIndicator(.hidden)
+        }
+        .fullScreenCover(item: $imageViewer) { viewer in
+            GalleryImageViewer(viewer: viewer)
+        }
+        .alert(item: $viewModel.alert) { alert in
+            Alert(
+                title: Text(alert.title),
+                message: Text(alert.message),
+                dismissButton: .default(Text("知道了"))
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var profileSection: some View {
+        switch viewModel.profileStatus {
+        case .idle, .loading:
+            ProgressView("正在加载主页")
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 48)
+        case let .failed(message):
+            ContentUnavailableView {
+                Label("加载失败", systemImage: "person.crop.circle.badge.exclamationmark")
+            } description: {
+                Text(message)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 20)
+        case .loaded:
+            if let info = viewModel.userInfo {
+                MineProfileCard(
+                    info: info,
+                    posterCountText: viewModel.posterCountText
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var posterSection: some View {
+        let visiblePosters = CommunityModeration
+            .filterVisiblePosters(viewModel.posterState.items, snapshot: settings.snapshot)
+
+        switch viewModel.posterState.status {
+        case .idle where visiblePosters.isEmpty:
+            ProgressView("正在加载帖子")
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 28)
+        case .loading where visiblePosters.isEmpty:
+            ProgressView("正在加载帖子")
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 28)
+        case let .failed(message) where visiblePosters.isEmpty:
+            ContentUnavailableView {
+                Label("加载帖子失败", systemImage: "text.bubble")
+            } description: {
+                Text(message)
+            }
+        default:
+            if visiblePosters.isEmpty {
+                ContentUnavailableView("暂无帖子", systemImage: "text.bubble")
+            } else {
+                ForEach(Array(visiblePosters.enumerated()), id: \.element.id) { index, poster in
+                    VStack(spacing: 0) {
+                        GalleryPosterCard(
+                            poster: poster,
+                            onOpenPoster: { selectedPoster = poster },
+                            onOpenImage: { index, images in
+                                imageViewer = GalleryImageViewerState(images: images, initialIndex: index)
+                            },
+                            onReport: nil,
+                            onDelete: nil
+                        )
+                        .task {
+                            await viewModel.loadMorePostersIfNeeded(currentPoster: poster)
+                        }
+
+                        if index != visiblePosters.count - 1 {
+                            Divider()
+                                .padding(.leading, 14)
+                        }
+                    }
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                }
+
+                if viewModel.posterState.isLoadingMore {
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                        Spacer()
+                    }
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                }
+            }
+        }
+    }
+
+    private var navigationTitle: String {
+        viewModel.userInfo?.user.nickname.isEmpty == false ? viewModel.userInfo!.user.nickname : "主页"
+    }
+}
+
 /// 个人信息卡片。
 private struct MineProfileCard: View {
     let info: MineUserInfo
     let posterCountText: String
-    let onOpenFollowers: () -> Void
-    let onOpenFollowings: () -> Void
-    let onOpenPosters: () -> Void
-    @State private var isShowingUID = false
-    @State private var isShowingJoinDate = false
+    let onOpenFollowers: (() -> Void)?
+    let onOpenFollowings: (() -> Void)?
+    let onOpenPosters: (() -> Void)?
+
+    init(
+        info: MineUserInfo,
+        posterCountText: String,
+        onOpenFollowers: (() -> Void)? = nil,
+        onOpenFollowings: (() -> Void)? = nil,
+        onOpenPosters: (() -> Void)? = nil
+    ) {
+        self.info = info
+        self.posterCountText = posterCountText
+        self.onOpenFollowers = onOpenFollowers
+        self.onOpenFollowings = onOpenFollowings
+        self.onOpenPosters = onOpenPosters
+    }
 
     /// 资料卡主体。
     var body: some View {
         VStack(spacing: 0) {
-            AsyncImage(url: URL(string: info.user.avatar.url)) { phase in
-                switch phase {
-                case let .success(image):
-                    image
-                        .resizable()
-                        .scaledToFill()
-                default:
-                    Circle()
-                        .fill(Color.blue.opacity(0.14))
-                        .overlay {
-                            Image(systemName: "person.fill")
-                                .foregroundStyle(.blue)
-                                .font(.title2)
-                        }
-                }
+            CachedRemoteImage(url: URL(string: info.user.avatar.url)) { image in
+                image
+                    .resizable()
+                    .scaledToFill()
+            } placeholder: {
+                Circle()
+                    .fill(Color.blue.opacity(0.14))
+                    .overlay {
+                        Image(systemName: "person.fill")
+                            .foregroundStyle(.blue)
+                            .font(.title2)
+                    }
             }
             .frame(width: 78, height: 78)
             .clipShape(Circle())
@@ -199,28 +354,6 @@ private struct MineProfileCard: View {
             }
 
             Spacer().frame(height: 6)
-
-            HStack(spacing: 12) {
-                MineSensitiveBadge(
-                    title: "UID",
-                    systemImage: "number",
-                    value: String(info.user.id),
-                    isRevealed: $isShowingUID
-                )
-
-                if let joinedText = joinedDateText {
-                    MineSensitiveBadge(
-                        title: nil,
-                        systemImage: "calendar",
-                        value: joinedText,
-                        isRevealed: $isShowingJoinDate
-                    )
-                }
-            }
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-
-            Spacer().frame(height: 10)
 
             Text(info.user.motto.isEmpty ? "空简介" : info.user.motto)
                 .font(.body)
@@ -241,58 +374,6 @@ private struct MineProfileCard: View {
 
     private var identityColor: Color {
         MineColorDecoder.color(from: info.user.identity.color) ?? .secondary
-    }
-
-    private var joinedDateText: String? {
-        MineDateDecoder.joinDateText(from: info.user.createTime)
-    }
-}
-
-/// “我的”页里用于默认模糊展示敏感信息的胶囊标签。
-private struct MineSensitiveBadge: View {
-    let title: String?
-    let systemImage: String
-    let value: String
-    @Binding var isRevealed: Bool
-
-    var body: some View {
-        Button {
-            isRevealed.toggle()
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: systemImage)
-                if let title, !title.isEmpty {
-                    Text("\(title)：")
-                }
-                MineSensitiveValueText(value: value, isRevealed: isRevealed)
-            }
-            .labelStyle(.titleAndIcon)
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-/// 敏感内容默认显示为毛玻璃遮罩，点击后再展示真实值。
-private struct MineSensitiveValueText: View {
-    let value: String
-    let isRevealed: Bool
-
-    var body: some View {
-        Group {
-            if isRevealed {
-                Text(value)
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(.primary)
-            } else {
-                Text(value)
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(.primary)
-                    .blur(radius: 7)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-        }
     }
 }
 
@@ -320,20 +401,17 @@ private struct MineUserListView: View {
                 List {
                     ForEach(users) { user in
                         HStack(spacing: 12) {
-                            AsyncImage(url: URL(string: user.avatar.lowUrl.isEmpty ? user.avatar.url : user.avatar.lowUrl)) { phase in
-                                switch phase {
-                                case let .success(image):
-                                    image
-                                        .resizable()
-                                        .scaledToFill()
-                                default:
-                                    Circle()
-                                        .fill(Color.blue.opacity(0.14))
-                                        .overlay {
-                                            Image(systemName: "person.fill")
-                                                .foregroundStyle(.blue)
-                                        }
-                                }
+                            CachedRemoteImage(url: URL(string: user.avatar.lowUrl.isEmpty ? user.avatar.url : user.avatar.lowUrl)) { image in
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                            } placeholder: {
+                                Circle()
+                                    .fill(Color.blue.opacity(0.14))
+                                    .overlay {
+                                        Image(systemName: "person.fill")
+                                            .foregroundStyle(.blue)
+                                    }
                             }
                             .frame(width: 46, height: 46)
                             .clipShape(Circle())
@@ -476,7 +554,7 @@ private struct MinePosterListView: View {
                 )
             }
             .presentationDetents([.large])
-            .presentationDragIndicator(.visible)
+            .presentationDragIndicator(.hidden)
         }
         .fullScreenCover(item: $imageViewer) { viewer in
             GalleryImageViewer(viewer: viewer)
@@ -530,20 +608,30 @@ private struct MinePosterListView: View {
 private struct MineStatButton: View {
     let number: String
     let title: String
-    let action: () -> Void
+    let action: (() -> Void)?
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                Text(number)
-                    .font(.headline.weight(.bold))
-                    .foregroundStyle(.primary)
-                Text(title)
-                    .font(.subheadline.weight(.bold))
-                    .foregroundStyle(.secondary)
+        Group {
+            if let action {
+                Button(action: action) {
+                    content
+                }
+                .buttonStyle(.plain)
+            } else {
+                content
             }
         }
-        .buttonStyle(.plain)
+    }
+
+    private var content: some View {
+        HStack(spacing: 4) {
+            Text(number)
+                .font(.headline.weight(.bold))
+                .foregroundStyle(.primary)
+            Text(title)
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -556,28 +644,6 @@ private enum MineDateDecoder {
     ]
 
     private static let iso8601Formatter = ISO8601DateFormatter()
-    private static let relativeFormatter = RelativeDateTimeFormatter()
-    private static let joinDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
-    }()
-
-    static func relativeText(from string: String) -> String {
-        guard let date = date(from: string) else {
-            return "未知时间"
-        }
-        return relativeFormatter.localizedString(for: date, relativeTo: Date())
-    }
-
-    static func joinDateText(from string: String) -> String? {
-        guard let date = date(from: string) else {
-            return nil
-        }
-        return "\(joinDateFormatter.string(from: date)) 加入"
-    }
-
     private static func date(from string: String) -> Date? {
         for formatter in sourceFormatters {
             if let date = formatter.date(from: string) {

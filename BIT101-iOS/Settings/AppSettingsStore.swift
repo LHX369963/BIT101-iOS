@@ -58,20 +58,14 @@ struct AppSettingsSnapshot: Codable, Equatable {
     var pageOrder: [AppTab] = AppTab.allCases
     /// 被用户隐藏的 tab。
     var hiddenTabs: [AppTab] = []
-    /// 是否允许动态主题效果。
-    var dynamicTheme = true
     /// 用户主动指定的主题模式。
     var themeMode: AppThemeMode = .system
     /// 是否允许界面自动旋转。
     var autoRotate = false
-    /// 是否隐藏带机器人标签的帖子。
-    var galleryHideBotPoster = false
     /// 是否在搜索结果里也隐藏机器人帖子。
     var galleryHideBotPosterInSearch = false
-    /// 是否启用更严格的话题过滤。
+    /// 是否启用更严格的画廊过滤。
     var galleryHideStrictMode = false
-    /// 是否允许话题页左右轻扫切换。
-    var galleryAllowHorizontalScroll = false
     /// 用户主动屏蔽的用户 ID 列表。
     var galleryHiddenUserIDs: [Int] = []
     /// 用户主动隐藏的帖子摘要。
@@ -87,7 +81,7 @@ struct AppSettingsSnapshot: Codable, Equatable {
 @MainActor
 /// 全局设置仓库。
 ///
-/// 页面顺序、主题、话题过滤规则等都会统一写入这里，再由具体页面按需读取。
+/// 页面顺序、主题、画廊过滤规则等都会统一写入这里，再由具体页面按需读取。
 final class AppSettingsStore: ObservableObject {
     static let shared = AppSettingsStore()
     nonisolated static let storageKeyPrefix = "app.settings.snapshot"
@@ -123,13 +117,10 @@ final class AppSettingsStore: ObservableObject {
     var homeTab: AppTab { snapshot.homeTab }
     var pageOrder: [AppTab] { snapshot.pageOrder }
     var hiddenTabs: [AppTab] { snapshot.hiddenTabs }
-    var dynamicTheme: Bool { snapshot.dynamicTheme }
     var themeMode: AppThemeMode { snapshot.themeMode }
     var autoRotate: Bool { snapshot.autoRotate }
-    var galleryHideBotPoster: Bool { snapshot.galleryHideBotPoster }
     var galleryHideBotPosterInSearch: Bool { snapshot.galleryHideBotPosterInSearch }
     var galleryHideStrictMode: Bool { snapshot.galleryHideStrictMode }
-    var galleryAllowHorizontalScroll: Bool { snapshot.galleryAllowHorizontalScroll }
     var galleryHiddenUserIDs: [Int] { snapshot.galleryHiddenUserIDs }
     var galleryHiddenPosters: [HiddenPosterRecord] { snapshot.galleryHiddenPosters }
     var galleryHiddenPosterIDs: [Int] { snapshot.galleryHiddenPosters.map(\.id) }
@@ -176,12 +167,6 @@ final class AppSettingsStore: ObservableObject {
         save()
     }
 
-    /// 修改动态主题开关。
-    func setDynamicTheme(_ enabled: Bool) {
-        snapshot.dynamicTheme = enabled
-        save()
-    }
-
     /// 修改固定主题模式。
     func setThemeMode(_ mode: AppThemeMode) {
         snapshot.themeMode = mode
@@ -192,20 +177,17 @@ final class AppSettingsStore: ObservableObject {
     func setAutoRotate(_ enabled: Bool) {
         snapshot.autoRotate = enabled
         save()
+        AppOrientationController.applyPreference(autoRotate: enabled)
     }
 
-    /// 一次性更新话题治理相关设置。
+    /// 一次性更新画廊治理相关设置。
     func updateGallerySettings(
-        hideBotPoster: Bool? = nil,
         hideBotPosterInSearch: Bool? = nil,
         hideStrictMode: Bool? = nil,
-        allowHorizontalScroll: Bool? = nil,
         hiddenUserIDs: [Int]? = nil
     ) {
-        if let hideBotPoster { snapshot.galleryHideBotPoster = hideBotPoster }
         if let hideBotPosterInSearch { snapshot.galleryHideBotPosterInSearch = hideBotPosterInSearch }
         if let hideStrictMode { snapshot.galleryHideStrictMode = hideStrictMode }
-        if let allowHorizontalScroll { snapshot.galleryAllowHorizontalScroll = allowHorizontalScroll }
         if let hiddenUserIDs { snapshot.galleryHiddenUserIDs = hiddenUserIDs }
         save()
     }
