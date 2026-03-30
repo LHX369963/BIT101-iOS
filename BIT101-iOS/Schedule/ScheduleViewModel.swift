@@ -324,7 +324,7 @@ final class ScheduleViewModel: ObservableObject {
 
     /// 设置灵动岛/锁屏提醒的提前显示阈值。
     func setCourseLiveActivityLeadMinutes(_ value: Int) {
-        cache.courseLiveActivityLeadMinutes = min(max(value, 1), 99)
+        cache.courseLiveActivityLeadMinutes = min(max(value, 1), 60)
         persist()
     }
 
@@ -363,6 +363,98 @@ final class ScheduleViewModel: ObservableObject {
         }
 
         cache.timeTable = timeTable
+        persist()
+    }
+
+    /// 生成新增课程用的默认草稿。
+    ///
+    /// 周次默认留空，避免把“当前周”误当成用户真正想填的周次范围。
+    /// 节次则给一个最常见的双节课起点。
+    func courseDraft(for week: Int) -> CourseDraft {
+        CourseDraft(
+            weekday: 1,
+            startSection: 1,
+            endSection: min(2, max(cache.timeTable.count, 1)),
+            weeksText: ""
+        )
+    }
+
+    /// 新增一条本地课程。
+    ///
+    /// 这里不会回写学校接口，而是只修改本地缓存，用于补录临时课程或手动修正。
+    func addCourse(_ draft: CourseDraft) throws {
+        let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else {
+            throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "课程名称不能为空。"])
+        }
+
+        let weeks = try parseWeeksText(draft.weeksText)
+        guard draft.startSection > 0, draft.endSection >= draft.startSection else {
+            throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "节次范围不合法。"])
+        }
+
+        cache.courses.append(
+            CourseRecord(
+                id: UUID().uuidString,
+                term: cache.currentTerm,
+                name: title,
+                teacher: draft.teacher.trimmingCharacters(in: .whitespacesAndNewlines),
+                classroom: draft.classroom.trimmingCharacters(in: .whitespacesAndNewlines),
+                description: "",
+                weeks: weeks,
+                weekday: draft.weekday,
+                startSection: draft.startSection,
+                endSection: draft.endSection,
+                campus: "",
+                number: "",
+                credit: 0,
+                hour: 0,
+                type: "",
+                category: "",
+                department: ""
+            )
+        )
+        persist()
+    }
+
+    /// 删除课程在当前周的这一节显示。
+    ///
+    /// 如果删完后课程已不再覆盖任何周次，则直接移除整门课。
+    func deleteCourseOccurrence(id: String, week: Int) {
+        guard let index = cache.courses.firstIndex(where: { $0.id == id }) else { return }
+
+        let course = cache.courses[index]
+        let remainingWeeks = course.weeks.filter { $0 != week }
+
+        if remainingWeeks.isEmpty {
+            cache.courses.remove(at: index)
+        } else {
+            cache.courses[index] = CourseRecord(
+                id: course.id,
+                term: course.term,
+                name: course.name,
+                teacher: course.teacher,
+                classroom: course.classroom,
+                description: course.description,
+                weeks: remainingWeeks,
+                weekday: course.weekday,
+                startSection: course.startSection,
+                endSection: course.endSection,
+                campus: course.campus,
+                number: course.number,
+                credit: course.credit,
+                hour: course.hour,
+                type: course.type,
+                category: course.category,
+                department: course.department
+            )
+        }
+        persist()
+    }
+
+    /// 删除整门课程。
+    func deleteCourse(id: String) {
+        cache.courses.removeAll { $0.id == id }
         persist()
     }
 
@@ -622,6 +714,40 @@ final class ScheduleViewModel: ObservableObject {
             if isCancellation(error) { return }
             notice = ScheduleNotice(title: "教学楼同步失败", message: error.localizedDescription)
         }
+    }
+
+    /// 把“1-4,6,8-10”之类的周次文本解析成有序周次数组。
+    private func parseWeeksText(_ text: String) throws -> [Int] {
+        let cleaned = text.replacingOccurrences(of: "，", with: ",")
+        let segments = cleaned
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard !segments.isEmpty else {
+            throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "周次不能为空。"])
+        }
+
+        var weeks = Set<Int>()
+
+        for segment in segments {
+            if segment.contains("-") {
+                let bounds = segment.split(separator: "-").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                guard bounds.count == 2, let lower = Int(bounds[0]), let upper = Int(bounds[1]), lower > 0, upper >= lower else {
+                    throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "周次格式不正确，请使用如 1-16,18 的写法。"])
+                }
+                for week in lower ... upper {
+                    weeks.insert(week)
+                }
+            } else {
+                guard let week = Int(segment), week > 0 else {
+                    throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "周次格式不正确，请使用如 1-16,18 的写法。"])
+                }
+                weeks.insert(week)
+            }
+        }
+
+        return weeks.sorted()
     }
 
     /// 把原始教室占用记录格式化成可直接展示的空教室列表。

@@ -11,6 +11,7 @@ import WidgetKit
 /// 课表小组件与主 App 共享的 App Group 标识。
 ///
 /// 小组件无法直接读取主 App 沙盒内的缓存，因此需要通过共享容器同步一份精简课表快照。
+/// 这里的“共享容器”只服务于桌面/锁屏 widget 时间线，不承担 Live Activity 状态同步。
 enum ScheduleWidgetSharedContainer {
     static let identifier = "group.BIT101-dev.BIT101-iOS.shared"
 }
@@ -41,7 +42,9 @@ struct ScheduleWidgetCourseSnapshot: Codable {
 /// 提供给小组件时间线使用的共享课表快照。
 ///
 /// 这是主 App 与 widget extension 之间的数据契约。只要它稳定，两侧就可以独立演进视图实现。
+/// 这里刻意只导出 widget 时间线真正需要的课表字段，不追求把主 app 里的所有日程能力都搬过去。
 struct ScheduleWidgetSnapshot: Codable {
+    let isLoggedIn: Bool
     let firstDayString: String
     let timeTable: [ScheduleWidgetTimeSlotSnapshot]
     let courses: [ScheduleWidgetCourseSnapshot]
@@ -50,6 +53,7 @@ struct ScheduleWidgetSnapshot: Codable {
 /// 小组件共享快照的磁盘仓库。
 ///
 /// 主 App 负责写入，小组件负责读取。
+/// 它解决的是“两个 target 无法直接共享内存对象”的问题，因此落点一定是 App Group 里的磁盘文件。
 enum ScheduleWidgetSnapshotStore {
     private static let fileName = "schedule-widget-snapshot.json"
 
@@ -108,6 +112,8 @@ enum ScheduleWidgetSnapshotStore {
 /// 把当前账号课表缓存导出给小组件的桥接器。
 enum ScheduleWidgetExporter {
     /// 重新读取当前账号缓存，并同步到共享容器。
+    ///
+    /// 这个入口给应用生命周期、登录切换等“没有直接拿到最新缓存对象”的场景使用。
     static func syncFromCurrentCache() {
         sync(cache: ScheduleCacheStore.load())
     }
@@ -116,8 +122,11 @@ enum ScheduleWidgetExporter {
     ///
     /// 这里故意只导出课表、小节次和首周信息，不把 DDL / 自定义日程 /
     /// 其它界面设置一起带进 widget，保持共享快照最小化。
+    /// 换句话说，这份导出主要服务“下一节课/后续几节课”这类展示，不承担完整日程镜像的职责。
     static func sync(cache: ScheduleCache) {
+        let isLoggedIn = !LoginStorage.shared.fakeCookie.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let snapshot = ScheduleWidgetSnapshot(
+            isLoggedIn: isLoggedIn,
             firstDayString: cache.firstDayString,
             timeTable: cache.timeTable.map {
                 ScheduleWidgetTimeSlotSnapshot(id: $0.id, start: $0.start, end: $0.end)

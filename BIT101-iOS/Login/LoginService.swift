@@ -87,6 +87,7 @@ final class LoginStorage {
 
     private enum DefaultsKey {
         static let fakeCookie = "login.fakeCookie"
+        static let installationMarker = "login.installationMarker"
     }
 
     private enum KeychainAccount {
@@ -97,6 +98,10 @@ final class LoginStorage {
     private let keychainService = "harrybit.BIT101-iOS.login"
     private let defaults = UserDefaults.standard
     private let cookieStorage = HTTPCookieStorage.shared
+
+    private init() {
+        purgePersistedCredentialsIfNeededAfterReinstall()
+    }
 
     /// 通知全局“当前账号相关数据已变化”。
     ///
@@ -143,14 +148,15 @@ final class LoginStorage {
         notifyAccountChanged()
     }
 
-    /// 清理当前会话，但保留账号密码，方便下次乐观进入主界面。
+    /// 清理当前会话，并清掉已保存密码，但保留学号，方便下次重新输入。
     ///
-    /// 这是“退出登录但不清空凭据”的语义，主要用于发现远端会话失效时快速回到未登录态。
+    /// 这是“退出登录但不清空学号”的语义，主要用于发现远端会话失效时快速回到未登录态。
     func clearSession() {
         defaults.removeObject(forKey: DefaultsKey.fakeCookie)
 
         // 学校侧登录态完全依赖 cookie，退出时必须一起清理，否则后续会误判为仍然在学校侧已登录。
         cookieStorage.cookies?.forEach { cookieStorage.deleteCookie($0) }
+        deleteKeychainValue(account: KeychainAccount.password)
         notifyAccountChanged()
     }
 
@@ -163,6 +169,21 @@ final class LoginStorage {
         deleteKeychainValue(account: KeychainAccount.studentID)
         deleteKeychainValue(account: KeychainAccount.password)
         notifyAccountChanged()
+    }
+
+    /// 检测“卸载重装后的首次启动”，并在登录页读取本地凭据前清掉残留 Keychain。
+    ///
+    /// `UserDefaults` 会在卸载时被系统清掉，而 Keychain 通常会保留。
+    /// 因此只要发现安装标记缺失，就说明这是一次全新安装或重装后的首次启动，
+    /// 需要把上一个安装遗留的学号密码一起抹掉，避免登录界面先闪出旧账号。
+    private func purgePersistedCredentialsIfNeededAfterReinstall() {
+        guard !defaults.bool(forKey: DefaultsKey.installationMarker) else { return }
+
+        defaults.removeObject(forKey: DefaultsKey.fakeCookie)
+        cookieStorage.cookies?.forEach { cookieStorage.deleteCookie($0) }
+        deleteKeychainValue(account: KeychainAccount.studentID)
+        deleteKeychainValue(account: KeychainAccount.password)
+        defaults.set(true, forKey: DefaultsKey.installationMarker)
     }
 
     private func saveKeychainValue(_ value: String, account: String) throws {

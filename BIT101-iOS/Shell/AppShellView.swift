@@ -126,12 +126,12 @@ struct AppShellView: View {
                 }
             )
         }
-        .alert("1.1.0版本更新", isPresented: $isShowingStartupNotice) {
+        .alert("1.2.0版本更新", isPresented: $isShowingStartupNotice) {
             Button("确定") {
                 settings.markCurrentStartupNoticeSeen()
             }
         } message: {
-            Text("1、bugfix\n2、支持桌面小组件\n3、灵动岛")
+            Text("1、bugfix\n2、支持锁屏小组件\n3、灵动岛完善\n可以尝试在“课程表设置”内启用灵动岛哦～")
         }
         .onAppear {
             let initial = settings.visibleTabs.contains(settings.homeTab) ? settings.homeTab : (settings.visibleTabs.first ?? .schedule)

@@ -75,6 +75,27 @@ struct BIT101_iOSApp: App {
     /// 保留一个 UIKit delegate 入口，用于响应方向能力查询。
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    /// 统一触发“共享课表快照 + Live Activity 刷新”。
+    ///
+    /// 只有在启动和切号这两类场景里，主 app 才需要显式把课表缓存再导出一遍；
+    /// 其它常规课表写回路径会在 `ScheduleCacheStore.save` 内部自己完成共享快照导出。
+    private func refreshScheduleExternalDisplays(trigger: String, syncWidgetSnapshot: Bool) {
+        if syncWidgetSnapshot {
+            ScheduleWidgetExporter.syncFromCurrentCache()
+        }
+
+        Task {
+            // 退出登录或登录失效后，直接结束现有提醒，避免旧 activity 继续挂在灵动岛上。
+            let fakeCookie = LoginStorage.shared.fakeCookie.trimmingCharacters(in: .whitespacesAndNewlines)
+            if fakeCookie.isEmpty {
+                await ScheduleLiveActivityManager.shared.endAllActivities()
+                return
+            }
+
+            await ScheduleLiveActivityManager.shared.refreshFromCurrentCache(trigger: trigger)
+        }
+    }
+
     /// 根场景定义。
     ///
     /// 当前应用只有一个主窗口，主题模式直接由设置中心快照驱动。
@@ -93,32 +114,24 @@ struct BIT101_iOSApp: App {
                     AppOrientationController.applyPreference(autoRotate: newValue)
                 }
                 .task {
-                    // 启动时把课表缓存同步到共享容器，并刷新 Live Activity，
-                    // 确保桌面小组件、锁屏组件和灵动岛拿到的是同一份最新数据。
-                    ScheduleWidgetExporter.syncFromCurrentCache()
-                    await ScheduleLiveActivityManager.shared.refreshFromCurrentCache()
+                    // 启动时补做一次导出与提醒刷新，保证外部展示拿到的是当前账号的最新缓存。
+                    refreshScheduleExternalDisplays(trigger: "app_launch_task", syncWidgetSnapshot: true)
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .loginStorageDidChange)) { _ in
                     // 切换账号后，组件和灵动岛必须立即改读新账号的缓存。
-                    ScheduleWidgetExporter.syncFromCurrentCache()
-                    Task {
-                        await ScheduleLiveActivityManager.shared.refreshFromCurrentCache()
-                    }
+                    refreshScheduleExternalDisplays(trigger: "login_storage_changed", syncWidgetSnapshot: true)
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .scheduleCacheDidChange)) { _ in
-                    // 课表、DDL、自定义日程等写回缓存后，同步刷新外部展示。
-                    Task {
-                        await ScheduleLiveActivityManager.shared.refreshFromCurrentCache()
-                    }
+                    // 这里主要负责刷新 Live Activity。
+                    // widget 快照本身已经在 `ScheduleCacheStore.save` 时同步导出了。
+                    refreshScheduleExternalDisplays(trigger: "schedule_cache_changed", syncWidgetSnapshot: false)
                 }
         }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
-                Task {
-                    // 应用重新回到前台时再做一次兜底刷新，避免后台停留期间
-                    // 课表提醒或小组件时间线与实际状态脱节。
-                    await ScheduleLiveActivityManager.shared.refreshFromCurrentCache()
-                }
+                // 应用重新回到前台时做一次兜底刷新，避免后台停留期间
+                // 课表提醒状态与实际时间脱节。
+                refreshScheduleExternalDisplays(trigger: "scene_active", syncWidgetSnapshot: false)
             }
         }
     }

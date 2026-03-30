@@ -12,6 +12,8 @@ import WidgetKit
 
 /// 课表未同步时统一使用的 widget 空态提示。
 private let scheduleWidgetCampusNetworkMessage = "请在校园网环境下，获取课表"
+/// 未登录时统一使用的 widget 空态提示。
+private let scheduleWidgetLoginMessage = "请登录"
 /// 当后续没有课程时统一使用的 widget 空态提示。
 private let scheduleWidgetRestMessage = "课已经上完，好好休息"
 
@@ -49,6 +51,7 @@ private struct ScheduleWidgetCourseSnapshot: Codable {
 ///
 /// 主 app 写、widget 读，只要这份结构稳定，两边就可以独立演进 UI。
 private struct ScheduleWidgetSnapshot: Codable {
+    let isLoggedIn: Bool
     let firstDayString: String
     let timeTable: [ScheduleWidgetTimeSlotSnapshot]
     let courses: [ScheduleWidgetCourseSnapshot]
@@ -58,15 +61,21 @@ private struct ScheduleWidgetSnapshot: Codable {
 struct CourseReminderActivityAttributes: ActivityAttributes {
     /// Live Activity 的动态显示内容。
     ///
-    /// 这里只保留锁屏和灵动岛真正需要的最小字段，
-    /// 避免把冗余信息带进 ActivityKit 的状态更新里。
+    /// 这里只保留锁屏和灵动岛真正需要的最小字段：
+    /// - `kindText` 用于区分“上课/日程”
+    /// - `title` 用于展示提醒标题
+    /// - `classroom/teacher` 用于锁屏态副标题兜底
+    /// - `countdownTargetDate` 是唯一参与倒计时的时间点
+    ///
+    /// 当前实现明确只做“课前提醒”，因此展示层不再依赖课程时长，
+    /// 只需要知道“倒计时应该指向哪一个未来时间”。
     public struct ContentState: Codable, Hashable {
         let kindText: String
         let title: String
         let classroom: String
         let teacher: String
-        let startDate: Date
-        let endDate: Date
+        let timeRangeText: String
+        let countdownTargetDate: Date
     }
 
     let studentID: String
@@ -141,11 +150,17 @@ private struct ScheduleWidgetOccurrence: Identifiable {
 @available(iOSApplicationExtension 16.2, *)
 /// 课程提醒 Live Activity 配置。
 ///
-/// 锁屏态展示完整信息；灵动岛紧凑态只保留“类型 + 分钟数”，
-/// 尽量压缩横向宽度，减少对系统岛布局的影响。
+/// 锁屏态展示完整提醒信息；灵动岛则拆成三种展示：
+/// - `expanded`：左侧显示提醒类型，右侧显示倒计时
+/// - `compact`：只保留“类型 + 倒计时”
+/// - `minimal`：退化成一个系统图标
+///
+/// 这块故意尽量贴近 Apple 的 Live Activity demo 写法：
+/// 展示层直接绑定一个目标时刻，让系统自己驱动 timer 文本更新。
 struct CourseReminderLiveActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: CourseReminderActivityAttributes.self) { context in
+            // 锁屏态：标题、副标题和完整倒计时都放在这里，信息最全。
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(context.state.kindText)
@@ -154,7 +169,7 @@ struct CourseReminderLiveActivityWidget: Widget {
 
                     Spacer(minLength: 0)
 
-                    Text(context.state.startDate, style: .time)
+                    Text(context.state.countdownTargetDate, style: .time)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
@@ -168,69 +183,124 @@ struct CourseReminderLiveActivityWidget: Widget {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
 
-                Text(timerTargetDate(for: context.state), style: .timer)
-                    .font(.title3.monospacedDigit())
-                    .fontWeight(.semibold)
+                LiveActivityTimerText(
+                    targetDate: context.state.countdownTargetDate,
+                    style: .large
+                )
             }
             .padding(12)
             .activityBackgroundTint(.clear)
         } dynamicIsland: { context in
             DynamicIsland {
-                DynamicIslandExpandedRegion(.leading, priority: 1) {
+                // 展开态左侧：只显示“课程/日程”类型，尽量贴近 demo 的低密度布局。
+                DynamicIslandExpandedRegion(.leading) {
                     Text(context.state.kindText)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .dynamicIsland(verticalPlacement: .belowIfTooWide)
+                        .lineLimit(1)
+                        .padding(.leading, 6)
                 }
+                // 展开态右侧：只放倒计时，尽量向 demo 的 timer 区域靠拢。
                 DynamicIslandExpandedRegion(.trailing) {
-                    VStack(alignment: .trailing, spacing: -1) {
-                        Text(countdownCaption(for: context.state))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-
-                        Text(timerTargetDate(for: context.state), style: .timer)
-                            .font(.caption)
-                            .lineLimit(1)
-                    }
+                    LiveActivityTimerText(
+                        targetDate: context.state.countdownTargetDate,
+                        style: .expanded
+                    )
+                    .padding(.trailing, 6)
+                }
+                // 展开态中间：标题单行显示，避免与摄像头区域和倒计时互相挤压。
+                DynamicIslandExpandedRegion(.center) {
+                    Text(context.state.title)
+                        .font(.headline)
+                        .lineLimit(1)
+                }
+                // 展开态底部：把时间段和地点压成一条摘要，保证必要信息都在但不堆多行。
+                DynamicIslandExpandedRegion(.bottom) {
+                    Text(liveActivityExpandedSummaryText(for: context.state))
+                        .font(.headline)
+                        .lineLimit(1)
                 }
             } compactLeading: {
+                // 紧凑态左侧只显示“上课/日程”，尽量降低占宽。
                 Text(context.state.kindText)
                     .font(.caption)
                     .lineLimit(1)
             } compactTrailing: {
-                Text(compactMinutesText(for: context.state))
-                    .font(.caption)
-                    .lineLimit(1)
+                // 紧凑态右侧只显示倒计时，是最需要稳定刷新的区域。
+                LiveActivityTimerText(
+                    targetDate: context.state.countdownTargetDate,
+                    style: .compact
+                )
             } minimal: {
                 Image(systemName: "calendar.badge.clock")
             }
-            .contentMargins([.leading, .trailing], 8, for: .expanded)
-            .contentMargins([.top, .bottom], 4, for: .expanded)
             .widgetURL(URL(string: "bit101://schedule/courses"))
         }
     }
 
-    private func timerTargetDate(for state: CourseReminderActivityAttributes.ContentState) -> Date {
-        let now = Date()
-        if state.startDate > now {
-            return state.startDate
+    /// 展开态底部统一摘要：开始时间优先，其后拼接地点/老师。
+    private func liveActivityExpandedSummaryText(for state: CourseReminderActivityAttributes.ContentState) -> String {
+        let classroom = state.classroom.trimmingCharacters(in: .whitespacesAndNewlines)
+        let teacher = state.teacher.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !classroom.isEmpty && !teacher.isEmpty {
+            return "\(state.timeRangeText) \(classroom) \(teacher)"
         }
-        return state.endDate
+        if !classroom.isEmpty {
+            return "\(state.timeRangeText) \(classroom)"
+        }
+        if !teacher.isEmpty {
+            return "\(state.timeRangeText) \(teacher)"
+        }
+        return state.timeRangeText
     }
 
-    /// 展开态右上角的小标题：未开始显示“距离”，进行中显示“剩余”。
-    private func countdownCaption(for state: CourseReminderActivityAttributes.ContentState) -> String {
-        state.startDate > Date() ? "距离" : "剩余"
+}
+
+/// Live Activity 使用的动态计时视图。
+///
+/// 这里不再显示“课中剩余时间”，只负责在课前窗口里倒计时到开始。
+/// 结构上尽量贴近 Apple 常见 demo：直接绑定一个未来 Date，并交给系统 timer 文本刷新。
+private struct LiveActivityTimerText: View {
+    enum Style {
+        case large
+        case expanded
+        case compact
     }
 
-    /// 紧凑态右侧的分钟数文本，例如 `12分`。
-    private func compactMinutesText(for state: CourseReminderActivityAttributes.ContentState) -> String {
-        let now = Date()
-        let target = state.startDate > now ? state.startDate : state.endDate
-        let seconds = max(0, Int(target.timeIntervalSince(now)))
-        let minutes = Int(ceil(Double(seconds) / 60.0))
-        return "\(minutes)分"
+    let targetDate: Date
+    let style: Style
+
+    var body: some View {
+        switch style {
+        case .large:
+            // 锁屏态允许更大字体，优先保证可读性。
+            timerText
+                .font(.title3.monospacedDigit())
+                .fontWeight(.semibold)
+        case .expanded:
+            timerText
+                .multilineTextAlignment(.trailing)
+                .frame(width: 42)
+                .font(.caption2)
+                .lineLimit(1)
+        case .compact:
+            // 紧凑态宽度固定，避免倒计时文本长度变化时把岛继续撑宽。
+            timerText
+                .multilineTextAlignment(.center)
+                .frame(width: 40)
+                .font(.caption2)
+                .lineLimit(1)
+        }
+    }
+
+    /// 使用原生区间倒计时；到点后不再继续显示计时文本，实际 activity 结束交给主 app 调度层处理。
+    @ViewBuilder
+    private var timerText: some View {
+        if Date() < targetDate {
+            Text(targetDate, style: .timer)
+        } else {
+            EmptyView()
+        }
     }
 }
 
@@ -285,6 +355,10 @@ private struct ScheduleWidgetProvider: TimelineProvider {
     private func loadEntry() -> ScheduleWidgetEntry {
         guard let snapshot = loadSnapshot() else {
             return emptyEntry(message: scheduleWidgetCampusNetworkMessage)
+        }
+
+        guard snapshot.isLoggedIn else {
+            return emptyEntry(message: scheduleWidgetLoginMessage)
         }
 
         guard let firstDay = Self.parseDate(snapshot.firstDayString) else {
@@ -562,7 +636,7 @@ private struct ScheduleWidgetEntryView: View {
                         .lineLimit(1)
                 }
             } else {
-                Text(entry.message == scheduleWidgetCampusNetworkMessage ? "请先同步课表" : "暂无课程")
+                Text(accessoryEmptyText)
                     .font(.caption)
                     .lineLimit(2)
             }
@@ -576,7 +650,7 @@ private struct ScheduleWidgetEntryView: View {
                 Text("\(first.isCurrent ? "正在上" : "下一节") \(first.title)")
                     .lineLimit(1)
             } else {
-                Text(entry.message == scheduleWidgetCampusNetworkMessage ? "请先同步课表" : "暂无课程")
+                Text(accessoryEmptyText)
                     .lineLimit(1)
             }
         }
@@ -600,7 +674,7 @@ private struct ScheduleWidgetEntryView: View {
                 VStack(spacing: 1) {
                     Image(systemName: "calendar")
                         .font(.caption2)
-                    Text("无课")
+                    Text(circularEmptyText)
                         .font(.system(size: 9, weight: .medium, design: .rounded))
                 }
             }
@@ -794,7 +868,27 @@ private struct ScheduleWidgetEntryView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            } else if entry.message == scheduleWidgetLoginMessage {
+                Text("登录后，这里会显示下一节课。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    private var accessoryEmptyText: String {
+        switch entry.message {
+        case scheduleWidgetLoginMessage:
+            return scheduleWidgetLoginMessage
+        case scheduleWidgetCampusNetworkMessage:
+            return "请先同步课表"
+        default:
+            return "暂无课程"
+        }
+    }
+
+    private var circularEmptyText: String {
+        entry.message == scheduleWidgetLoginMessage ? scheduleWidgetLoginMessage : "无课"
     }
 }

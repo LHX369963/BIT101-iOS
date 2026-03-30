@@ -34,6 +34,7 @@ struct ScheduleRootView: View {
     /// 壳层深链请求的目标分栏，例如从小组件点进来直接落到课表。
     @Binding var requestedSection: ScheduleSection?
     @StateObject private var viewModel = ScheduleViewModel()
+    @State private var courseTabResetSignal = 0
 
     /// 日程主页主体。
     var body: some View {
@@ -82,7 +83,10 @@ struct ScheduleRootView: View {
     private var selectedSectionView: some View {
         switch viewModel.selectedSection {
         case .courses:
-            CourseScheduleTabView(viewModel: viewModel)
+            CourseScheduleTabView(
+                viewModel: viewModel,
+                resetSignal: courseTabResetSignal
+            )
         case .ddl:
             DDLScheduleTabView(viewModel: viewModel)
         case .classroom:
@@ -129,6 +133,9 @@ struct ScheduleRootView: View {
         withAnimation(.easeInOut(duration: 0.2)) {
             viewModel.selectedSection = requestedSection
             if requestedSection == .courses {
+                // 从小组件、锁屏组件或灵动岛回到课表时，发一个“回首页”信号，
+                // 让课表分栏按正常 dismiss 路径收起当前 sheet。
+                courseTabResetSignal &+= 1
                 viewModel.resetToCurrentWeek()
             }
         }
@@ -159,10 +166,13 @@ private struct ScheduleSectionTabs: View {
 /// 负责周视图课表、悬浮操作按钮、自定义日程编辑以及跳转到共享设置中心。
 private struct CourseScheduleTabView: View {
     @ObservedObject var viewModel: ScheduleViewModel
+    let resetSignal: Int
     @State private var selectedEntry: ScheduleCalendarEntry?
     @State private var editingCustomScheduleID: String?
     @State private var customScheduleDraft = CustomScheduleDraft()
+    @State private var courseDraft = CourseDraft()
     @State private var isShowingEditSchedule = false
+    @State private var isShowingAddCourse = false
     @State private var settingsRoute: SettingsRoute?
 
     /// 课表分区主体。
@@ -202,11 +212,22 @@ private struct CourseScheduleTabView: View {
                             }
                             .disabled(viewModel.selectedWeek >= viewModel.maxWeek)
 
-                            CourseScheduleFAB(systemImage: "plus") {
-                                editingCustomScheduleID = nil
-                                customScheduleDraft = viewModel.customScheduleDraft(for: nil)
-                                isShowingEditSchedule = true
+                            Menu {
+                                Button("添加日程") {
+                                    editingCustomScheduleID = nil
+                                    customScheduleDraft = viewModel.customScheduleDraft(for: nil)
+                                    isShowingEditSchedule = true
+                                }
+
+                                Button("添加课程") {
+                                    courseDraft = viewModel.courseDraft(for: viewModel.selectedWeek)
+                                    isShowingAddCourse = true
+                                }
+                            } label: {
+                                CourseScheduleFABLabel(systemImage: "plus")
                             }
+                            .buttonStyle(.plain)
+                            .tint(.primary)
 
                             CourseScheduleFAB(systemImage: "gearshape") {
                                 settingsRoute = .calendar
@@ -242,7 +263,16 @@ private struct CourseScheduleTabView: View {
         .sheet(item: $selectedEntry) { entry in
             ScheduleEntryDetailSheet(
                 entry: entry,
+                currentWeek: viewModel.selectedWeek,
                 timeTable: viewModel.cache.timeTable,
+                onDeleteCourseOccurrence: {
+                    viewModel.deleteCourseOccurrence(id: entry.sourceID, week: viewModel.selectedWeek)
+                    selectedEntry = nil
+                },
+                onDeleteCourse: {
+                    viewModel.deleteCourse(id: entry.sourceID)
+                    selectedEntry = nil
+                },
                 onEditCustomSchedule: {
                     if let schedule = viewModel.cache.customSchedules.first(where: { $0.id == entry.sourceID }) {
                         editingCustomScheduleID = schedule.id
@@ -277,11 +307,43 @@ private struct CourseScheduleTabView: View {
                 }
             )
         }
+        .sheet(isPresented: $isShowingAddCourse) {
+            AddCourseSheet(
+                draft: $courseDraft,
+                timeTable: viewModel.cache.timeTable,
+                onSubmit: {
+                    do {
+                        try viewModel.addCourse(courseDraft)
+                        isShowingAddCourse = false
+                    } catch {
+                        viewModel.notice = ScheduleNotice(title: "保存失败", message: error.localizedDescription)
+                    }
+                },
+                onDismiss: {
+                    isShowingAddCourse = false
+                }
+            )
+        }
         .sheet(item: $settingsRoute) { route in
             NavigationStack {
                 SettingsRootView(initialRoute: route, studentID: "", onLogout: {})
             }
         }
+        .onChange(of: resetSignal) { _, _ in
+            dismissPresentedSheets()
+        }
+    }
+
+    /// 收起课表分栏当前打开的抽屉和设置页。
+    ///
+    /// 这里不重建整个分栏，而是直接走各个 sheet 的正常关闭路径，
+    /// 这样系统会复用原生下滑关闭动画，避免出现“闪现消失”。
+    private func dismissPresentedSheets() {
+        selectedEntry = nil
+        settingsRoute = nil
+        isShowingEditSchedule = false
+        isShowingAddCourse = false
+        editingCustomScheduleID = nil
     }
 
     private var scheduleEntries: [ScheduleCalendarEntry] {
@@ -628,13 +690,26 @@ private struct CourseScheduleFAB: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.primary)
-                .frame(width: 42, height: 42)
-                .background(.ultraThinMaterial, in: Circle())
+            CourseScheduleFABLabel(systemImage: systemImage)
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// 课表页悬浮圆形按钮的统一外观。
+///
+/// 单独抽出来后，`Button` 和 `Menu` 可以共用同一套视觉样式，
+/// 避免“添加”按钮因为交互容器不同而出现尺寸或命中区域错位。
+private struct CourseScheduleFABLabel: View {
+    let systemImage: String
+
+    var body: some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(.primary)
+            .frame(width: 42, height: 42)
+            .background(.ultraThinMaterial, in: Circle())
+            .contentShape(Circle())
     }
 }
 
@@ -667,10 +742,14 @@ private struct ScheduleCalendarEntry: Identifiable {
 /// 课表块点击后的二级详情页，兼容课程、考试和自定义日程三种来源。
 private struct ScheduleEntryDetailSheet: View {
     let entry: ScheduleCalendarEntry
+    let currentWeek: Int
     let timeTable: [TimeSlot]
+    let onDeleteCourseOccurrence: () -> Void
+    let onDeleteCourse: () -> Void
     let onEditCustomSchedule: () -> Void
     let onDeleteCustomSchedule: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var pendingCourseDeletion: PendingCourseDeletion?
 
     var body: some View {
         NavigationStack {
@@ -688,6 +767,17 @@ private struct ScheduleEntryDetailSheet: View {
                     Section("详情") {
                         ForEach(entry.detailLines, id: \.self) { line in
                             Text(line)
+                        }
+                    }
+                }
+
+                if entry.kind == .course {
+                    Section {
+                        Button("删除这节课", role: .destructive) {
+                            pendingCourseDeletion = .occurrence
+                        }
+                        Button("删除这门课", role: .destructive) {
+                            pendingCourseDeletion = .wholeCourse
                         }
                     }
                 }
@@ -711,6 +801,21 @@ private struct ScheduleEntryDetailSheet: View {
                     Button("关闭") { dismiss() }
                 }
             }
+            .alert(item: $pendingCourseDeletion) { target in
+                Alert(
+                    title: Text("确认删除"),
+                    message: Text(target.message(entry: entry, currentWeek: currentWeek)),
+                    primaryButton: .destructive(Text("删除")) {
+                        switch target {
+                        case .occurrence:
+                            onDeleteCourseOccurrence()
+                        case .wholeCourse:
+                            onDeleteCourse()
+                        }
+                    },
+                    secondaryButton: .cancel(Text("取消"))
+                )
+            }
         }
     }
 
@@ -719,6 +824,88 @@ private struct ScheduleEntryDetailSheet: View {
         case .course: return "课程详情"
         case .exam: return "考试详情"
         case .custom: return "自定义日程"
+        }
+    }
+
+    private enum PendingCourseDeletion: Identifiable {
+        case occurrence
+        case wholeCourse
+
+        var id: Int {
+            switch self {
+            case .occurrence: return 0
+            case .wholeCourse: return 1
+            }
+        }
+
+        func message(entry: ScheduleCalendarEntry, currentWeek: Int) -> String {
+            switch self {
+            case .occurrence:
+                return "你要删除的是第\(currentWeek)周第\(Int(entry.startSection) + 1)到第\(Int(entry.endSection))节的一节课：\(entry.title)"
+            case .wholeCourse:
+                return "你要删除的是\(entry.title)这门课的本学期所有课程"
+            }
+        }
+    }
+}
+
+/// 新增课程弹层。
+///
+/// 这是纯本地课程的补录入口，主要用于补一周里的临时课或手动修正课表。
+private struct AddCourseSheet: View {
+    @Binding var draft: CourseDraft
+    let timeTable: [TimeSlot]
+    let onSubmit: () -> Void
+    let onDismiss: () -> Void
+
+    private let weekdays = Array(1 ... 7)
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("内容") {
+                    TextField("课程名称", text: $draft.title)
+                    TextField("教师", text: $draft.teacher)
+                    TextField("教室", text: $draft.classroom)
+                    TextField("周次（如 1-16,18）", text: $draft.weeksText)
+                }
+
+                Section("时间") {
+                    Picker("星期", selection: $draft.weekday) {
+                        ForEach(weekdays, id: \.self) { weekday in
+                            Text("周\(weekday)").tag(weekday)
+                        }
+                    }
+
+                    Picker("开始节次", selection: $draft.startSection) {
+                        ForEach(timeTable) { slot in
+                            Text("第\(slot.id)节  \(slot.start)").tag(slot.id)
+                        }
+                    }
+
+                    Picker("结束节次", selection: $draft.endSection) {
+                        ForEach(timeTable.filter { $0.id >= draft.startSection }) { slot in
+                            Text("第\(slot.id)节  \(slot.end)").tag(slot.id)
+                        }
+                    }
+                }
+
+                Section {
+                    Text("添加的课程会存储在本地；删除应用后信息将丢失。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("添加课程")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消", action: onDismiss)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("确定", action: onSubmit)
+                }
+            }
         }
     }
 }
@@ -756,6 +943,10 @@ private struct AddEditCustomScheduleSheet: View {
           }
             .navigationTitle(isEditing ? "修改自定义日程" : "添加自定义日程")
             .navigationBarTitleDisplayMode(.inline)
+            .onChange(of: draft.beginTime) { _, newValue in
+                guard draft.endTime <= newValue else { return }
+                draft.endTime = Calendar.current.date(byAdding: .minute, value: 60, to: newValue) ?? newValue
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("取消", action: onDismiss)

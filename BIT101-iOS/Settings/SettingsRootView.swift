@@ -524,7 +524,7 @@ private struct CalendarSettingsPage: View {
     @State private var isShowingLiveActivityLeadMinutesPicker = false
 
     private var normalizedLeadMinutes: Int {
-        min(max(viewModel.cache.courseLiveActivityLeadMinutes, 1), 99)
+        min(max(viewModel.cache.courseLiveActivityLeadMinutes, 1), 60)
     }
 
     var body: some View {
@@ -569,16 +569,22 @@ private struct CalendarSettingsPage: View {
                     set: viewModel.setShowCourseLiveActivityReminder
                 ))
                 Button {
+                    guard viewModel.cache.showCourseLiveActivityReminder else { return }
                     isShowingLiveActivityLeadMinutesPicker = true
                 } label: {
                     HStack {
                         Text("提前显示阈值")
+                            .foregroundStyle(.primary)
                         Spacer()
                         Text("\(normalizedLeadMinutes) 分钟")
                             .foregroundStyle(.secondary)
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.tertiary)
                     }
                 }
-                .disabled(!viewModel.cache.showCourseLiveActivityReminder)
+                .buttonStyle(.plain)
+                .opacity(viewModel.cache.showCourseLiveActivityReminder ? 1 : 0.45)
             } header: {
                 Text("显示设置")
             }
@@ -630,10 +636,10 @@ private struct CourseLiveActivityLeadMinutesPickerPage: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var value: Int
 
-    /// 使用原生 wheel picker 提供 1...99 分钟的阈值选择。
+    /// 使用原生 wheel picker 提供 1...60 分钟的阈值选择。
     var body: some View {
         Picker("提前显示阈值", selection: $value) {
-            ForEach(1 ... 99, id: \.self) { minute in
+            ForEach(1 ... 60, id: \.self) { minute in
                 Text("\(minute) 分钟")
                     .tag(minute)
             }
@@ -803,10 +809,6 @@ private struct AboutSettingsPage: View {
                     Link("如果你也想加入，可以点击此处，向开发者发送邮件，以索要L站邀请码。", destination: URL(string: "mailto:systemd@linux.do")!)
                 }
                 .padding(.vertical, 2)
-            }
-
-            Section("版本信息") {
-                LabeledContent("当前版本", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "未知")
             }
 
             Section("联系我们") {

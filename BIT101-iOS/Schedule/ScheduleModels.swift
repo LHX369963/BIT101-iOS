@@ -135,6 +135,19 @@ struct CourseRecord: Codable, Identifiable, Hashable {
     }
 }
 
+/// 手动新增课程时使用的草稿模型。
+///
+/// 课程本体仍然落成 `CourseRecord`，草稿只服务于表单输入和本地校验。
+struct CourseDraft: Equatable {
+    var title = ""
+    var teacher = ""
+    var classroom = ""
+    var weekday = 1
+    var startSection = 1
+    var endSection = 2
+    var weeksText = ""
+}
+
 /// 考试记录。
 ///
 /// 当前考试数据主要在课表页下方和锁屏/桌面未来扩展中复用，所以保留完整字段。
@@ -331,7 +344,10 @@ struct ScheduleCache: Codable {
         showCurrentTime = try container.decodeIfPresent(Bool.self, forKey: .showCurrentTime) ?? true
         showExamInfo = try container.decodeIfPresent(Bool.self, forKey: .showExamInfo) ?? true
         showCourseLiveActivityReminder = try container.decodeIfPresent(Bool.self, forKey: .showCourseLiveActivityReminder) ?? false
-        courseLiveActivityLeadMinutes = try container.decodeIfPresent(Int.self, forKey: .courseLiveActivityLeadMinutes) ?? 20
+        courseLiveActivityLeadMinutes = min(
+            max(try container.decodeIfPresent(Int.self, forKey: .courseLiveActivityLeadMinutes) ?? 20, 1),
+            60
+        )
         timeTable = try container.decodeIfPresent([TimeSlot].self, forKey: .timeTable) ?? TimeSlot.default
     }
 }
