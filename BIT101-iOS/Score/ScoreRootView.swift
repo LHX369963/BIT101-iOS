@@ -1,16 +1,55 @@
 import Combine
 import SwiftUI
 
+/// 成绩页本地筛选偏好快照。
+///
+/// 按账号保存上一次的学期与课程性质筛选，避免每次重进页面都重新全选。
+private struct ScoreFilterPreferenceSnapshot: Codable {
+    var selectedTerms: [String] = []
+    var selectedCourseTypes: [String] = []
+}
+
+/// 成绩筛选偏好的本地仓库。
+private enum ScoreFilterPreferenceStore {
+    private static let keyPrefix = "score.filter.preferences"
+
+    static func load() -> ScoreFilterPreferenceSnapshot? {
+        guard let data = UserDefaults.standard.data(forKey: storageKey) else { return nil }
+        return try? JSONDecoder().decode(ScoreFilterPreferenceSnapshot.self, from: data)
+    }
+
+    static func save(selectedTerms: Set<String>, selectedCourseTypes: Set<String>) {
+        let snapshot = ScoreFilterPreferenceSnapshot(
+            selectedTerms: Array(selectedTerms),
+            selectedCourseTypes: Array(selectedCourseTypes)
+        )
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+    }
+
+    private static var storageKey: String {
+        let studentID = LoginStorage.shared.currentStudentID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suffix = studentID.isEmpty ? "guest" : studentID
+        return "\(keyPrefix).\(suffix)"
+    }
+}
+
 /// 原生成绩页状态机。
 ///
 /// 固定以复杂模式查询成绩，并负责筛选同步、统计汇总以及错误提示。
 @MainActor
 final class ScoreViewModel: ObservableObject {
+    /// 全量成绩数据。
     @Published private(set) var rows: [ScoreRow] = []
+    /// 页面加载状态。
     @Published private(set) var state: ScoreLoadState = .idle
+    /// 当前可选学期列表。
     @Published private(set) var availableTerms: [String] = []
+    /// 当前可选课程性质列表。
     @Published private(set) var availableCourseTypes: [String] = []
+    /// 当前选中的学期集合。
     @Published private(set) var selectedTerms: Set<String> = []
+    /// 当前选中的课程性质集合。
     @Published private(set) var selectedCourseTypes: Set<String> = []
     @Published var alert: LoginAlert?
 
@@ -18,6 +57,8 @@ final class ScoreViewModel: ObservableObject {
     private var isRefreshing = false
     private var didInitializeTermSelection = false
     private var didInitializeCourseTypeSelection = false
+    /// 启动时读取一次已持久化的筛选快照。
+    private let preferenceSnapshot = ScoreFilterPreferenceStore.load()
 
     init(service: ScoreService) {
         self.service = service
@@ -79,6 +120,8 @@ final class ScoreViewModel: ObservableObject {
     }
 
     /// 当前筛选条件下实际可见的成绩。
+    ///
+    /// 成绩列表和统计摘要都基于这份过滤结果，而不是直接基于全量 `rows`。
     var filteredRows: [ScoreRow] {
         rows.filter { row in
             let matchesTerm = selectedTerms.contains(row.term)
@@ -95,43 +138,59 @@ final class ScoreViewModel: ObservableObject {
     /// 替换学期筛选结果，并自动剔除已不存在的选项。
     func setSelectedTerms(_ values: Set<String>) {
         selectedTerms = values.intersection(Set(availableTerms))
+        persistFilterPreferences()
     }
 
     /// 替换课程性质筛选结果，并自动剔除已不存在的选项。
     func setSelectedCourseTypes(_ values: Set<String>) {
         selectedCourseTypes = values.intersection(Set(availableCourseTypes))
+        persistFilterPreferences()
     }
 
     /// 在“全选学期”和“全不选学期”之间切换。
     func toggleAllTerms() {
         let allTerms = Set(availableTerms)
         selectedTerms = selectedTerms == allTerms ? [] : allTerms
+        persistFilterPreferences()
     }
 
     /// 在“全选课程性质”和“全不选课程性质”之间切换。
     func toggleAllCourseTypes() {
         let allCourseTypes = Set(availableCourseTypes)
         selectedCourseTypes = selectedCourseTypes == allCourseTypes ? [] : allCourseTypes
+        persistFilterPreferences()
     }
 
     /// 刷新可选项后，同步修正当前筛选集合。
+    ///
+    /// 首次进入时优先恢复本地偏好；后续刷新时则只做求交集，剔除已经不存在的旧选项。
     private func synchronizeFilters() {
         let termSet = Set(availableTerms)
         let typeSet = Set(availableCourseTypes)
 
         if !didInitializeTermSelection {
-            selectedTerms = termSet
+            if let persistedTerms = preferenceSnapshot?.selectedTerms {
+                selectedTerms = Set(persistedTerms).intersection(termSet)
+            } else {
+                selectedTerms = termSet
+            }
             didInitializeTermSelection = true
         } else {
             selectedTerms = selectedTerms.intersection(termSet)
         }
 
         if !didInitializeCourseTypeSelection {
-            selectedCourseTypes = typeSet
+            if let persistedCourseTypes = preferenceSnapshot?.selectedCourseTypes {
+                selectedCourseTypes = Set(persistedCourseTypes).intersection(typeSet)
+            } else {
+                selectedCourseTypes = typeSet
+            }
             didInitializeCourseTypeSelection = true
         } else {
             selectedCourseTypes = selectedCourseTypes.intersection(typeSet)
         }
+
+        persistFilterPreferences()
     }
 
     /// 提取去重后的非空字符串列表，并保留原始出现顺序。
@@ -145,6 +204,15 @@ final class ScoreViewModel: ObservableObject {
             values.append(trimmed)
         }
         return values
+    }
+
+    /// 把当前筛选结果写回本地偏好。
+    private func persistFilterPreferences() {
+        guard didInitializeTermSelection, didInitializeCourseTypeSelection else { return }
+        ScoreFilterPreferenceStore.save(
+            selectedTerms: selectedTerms,
+            selectedCourseTypes: selectedCourseTypes
+        )
     }
 
     /// 同时兼容 Swift Concurrency 和 URLSession 的取消错误。
@@ -170,6 +238,8 @@ struct ScoreRootView: View {
     @State private var selectedRow: ScoreRow?
 
     /// 成绩主页主体。
+    ///
+    /// 页面固定分成“筛选 -> 统计 -> 列表”三段，保持与 Android/网页的心智模型一致。
     var body: some View {
         Group {
             switch viewModel.state {
@@ -306,6 +376,8 @@ struct ScoreRootView: View {
 }
 
 /// 统计区单行展示。
+///
+/// 只是一个轻量包装，让统计 section 的几行 `LabeledContent` 看起来更统一。
 private struct ScoreSummaryRow: View {
     let title: String
     let value: String
@@ -395,6 +467,8 @@ private struct ScoreRowCard: View {
 }
 
 /// 成绩卡片里的单列定义。
+///
+/// 用固定比例列把两行信息对齐，避免不同长度课程名把后面的字段全部挤歪。
 private struct ScoreFixedColumnItem {
     let text: String
     let ratio: CGFloat
@@ -442,6 +516,8 @@ private struct ScoreFilterPage: View {
     let onToggleAll: () -> Void
 
     /// 通用多选筛选页。
+    ///
+    /// 学期筛选和种类筛选都复用这一套页面，只靠传入选项和绑定集合区分。
     var body: some View {
         List {
             Section {

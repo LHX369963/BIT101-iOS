@@ -8,11 +8,16 @@
 import Foundation
 
 /// 本地缓存发生变化时发出的通知。
+///
+/// 课表页、小组件导出和灵动岛刷新都会监听这条通知，用来做跨模块同步。
 extension Notification.Name {
     static let scheduleCacheDidChange = Notification.Name("BIT101.ScheduleCacheDidChange")
 }
 
 /// 日程页的一级分栏。
+///
+/// 课表、DDL、空教室虽然都挂在“日程”一级页签下，但数据来源和容器差异很大，
+/// 所以先用统一枚举收敛它们的切换语义。
 enum ScheduleSection: String, CaseIterable, Identifiable {
     case courses
     case ddl
@@ -35,6 +40,8 @@ enum ScheduleSection: String, CaseIterable, Identifiable {
 }
 
 /// 节次与时间段的映射。
+///
+/// `TimeSlot` 是课表、空教室、当前时间线、小组件和灵动岛共同依赖的基础模型。
 struct TimeSlot: Codable, Hashable, Identifiable {
     let id: Int
     let start: String
@@ -55,6 +62,7 @@ struct TimeSlot: Codable, Hashable, Identifiable {
         "\(start)-\(end)"
     }
 
+    /// 北理当前默认节次表。
     static let `default`: [TimeSlot] = [
         TimeSlot(id: 1, start: "08:00", end: "08:45"),
         TimeSlot(id: 2, start: "08:50", end: "09:35"),
@@ -88,6 +96,8 @@ struct TimeSlot: Codable, Hashable, Identifiable {
 }
 
 /// 课表课程记录。
+///
+/// 这是 iOS 端落盘后的统一课程模型，教务接口、缓存、小组件、灵动岛都围绕它工作。
 struct CourseRecord: Codable, Identifiable, Hashable {
     let id: String
     let term: String
@@ -126,6 +136,8 @@ struct CourseRecord: Codable, Identifiable, Hashable {
 }
 
 /// 考试记录。
+///
+/// 当前考试数据主要在课表页下方和锁屏/桌面未来扩展中复用，所以保留完整字段。
 struct ExamRecord: Codable, Identifiable, Hashable {
     let id: String
     let term: String
@@ -153,6 +165,8 @@ struct DDLEventRecord: Codable, Identifiable, Hashable {
 }
 
 /// 手动新增 / 编辑 DDL 时使用的草稿模型。
+///
+/// 草稿模型不直接落盘，只服务于表单编辑过程。
 struct DDLDraft: Equatable {
     var title = ""
     var dueAt = Date()
@@ -160,6 +174,8 @@ struct DDLDraft: Equatable {
 }
 
 /// 自定义课程块记录。
+///
+/// 用于补充学校接口之外的个人日程，后续也会参与灵动岛“下一项”判断。
 struct CustomScheduleRecord: Codable, Identifiable, Hashable {
     let id: String
     var title: String
@@ -181,6 +197,8 @@ struct CustomScheduleDraft: Equatable {
 }
 
 /// 空教室查询使用的校区记录。
+///
+/// 这是服务端返回的元数据模型，不直接参与排课运算，只负责驱动选择器。
 struct CampusRecord: Codable, Identifiable, Hashable {
     let id: String
     let name: String
@@ -188,6 +206,8 @@ struct CampusRecord: Codable, Identifiable, Hashable {
 }
 
 /// 空教室查询使用的教学楼记录。
+///
+/// 教学楼记录会被缓存，并用于“根据下一节课教室自动匹配教学楼”的逻辑。
 struct BuildingRecord: Codable, Identifiable, Hashable {
     let id: String
     let name: String
@@ -197,6 +217,8 @@ struct BuildingRecord: Codable, Identifiable, Hashable {
 }
 
 /// 空教室接口原始教室记录。
+///
+/// 原始记录只包含“哪些时间忙”，具体的中文空闲文案会在视图模型层再加工。
 struct ClassroomRecord: Codable, Identifiable, Hashable {
     let id: String
     let name: String
@@ -204,6 +226,8 @@ struct ClassroomRecord: Codable, Identifiable, Hashable {
 }
 
 /// 供界面展示的教室空闲状态。
+///
+/// 这是已经完成格式化、适合直接渲染到列表中的衍生模型。
 struct ClassroomAvailability: Identifiable, Hashable {
     let id: String
     let name: String
@@ -215,6 +239,15 @@ struct ClassroomAvailability: Identifiable, Hashable {
 }
 
 /// 日程模块本地缓存。
+///
+/// 这是 iOS 端整个日程模块的单一持久化快照：
+/// - 课表
+/// - 考试
+/// - DDL
+/// - 自定义日程
+/// - 空教室偏好
+/// - 课表显示设置
+/// - 灵动岛提醒设置
 struct ScheduleCache: Codable {
     var currentTerm: String = ""
     var firstDayString: String = ""
@@ -227,6 +260,7 @@ struct ScheduleCache: Codable {
     var ddlAfterDay = 3
     var selectedCampusName: String = ""
     var selectedCampusCode: String = ""
+    var selectedBuildingID: String = ""
     var selectedClassroomSectionIDs: [Int] = []
     var showSaturday = true
     var showSunday = true
@@ -256,6 +290,7 @@ struct ScheduleCache: Codable {
         case ddlAfterDay
         case selectedCampusName
         case selectedCampusCode
+        case selectedBuildingID
         case selectedClassroomSectionIDs
         case showSaturday
         case showSunday
@@ -269,6 +304,7 @@ struct ScheduleCache: Codable {
         case timeTable
     }
 
+    /// 提供一份带默认值的空缓存。
     init() {}
 
     init(from decoder: Decoder) throws {
@@ -285,6 +321,7 @@ struct ScheduleCache: Codable {
         ddlAfterDay = try container.decodeIfPresent(Int.self, forKey: .ddlAfterDay) ?? 3
         selectedCampusName = try container.decodeIfPresent(String.self, forKey: .selectedCampusName) ?? ""
         selectedCampusCode = try container.decodeIfPresent(String.self, forKey: .selectedCampusCode) ?? ""
+        selectedBuildingID = try container.decodeIfPresent(String.self, forKey: .selectedBuildingID) ?? ""
         selectedClassroomSectionIDs = try container.decodeIfPresent([Int].self, forKey: .selectedClassroomSectionIDs) ?? []
         showSaturday = try container.decodeIfPresent(Bool.self, forKey: .showSaturday) ?? true
         showSunday = try container.decodeIfPresent(Bool.self, forKey: .showSunday) ?? true
@@ -300,6 +337,8 @@ struct ScheduleCache: Codable {
 }
 
 /// 课程表和 DDL 共用的日期编解码工具。
+///
+/// 日程模块内部有多种日期展示形式，因此集中维护一组格式器，避免各页面各自创建。
 enum ScheduleDateCodec {
     /// 固定使用公历，避免系统日历设置影响周数计算。
     static let calendar = Calendar(identifier: .gregorian)
@@ -354,39 +393,48 @@ enum ScheduleDateCodec {
         return dateFormatter.date(from: string)
     }
 
+    /// 解析 `HH:mm` 文本为一个只关心时分的 `Date`。
     static func parseTime(_ string: String) -> Date? {
         timeFormatter.date(from: string)
     }
 
+    /// 格式化时分文本。
     static func formatTime(_ date: Date) -> String {
         timeFormatter.string(from: date)
     }
 
+    /// 格式化 `yyyy-MM-dd` 文本。
     static func formatDate(_ date: Date) -> String {
         dateFormatter.string(from: date)
     }
 
+    /// 格式化 `M月d日` 短日期。
     static func formatShortDate(_ date: Date) -> String {
         shortDateFormatter.string(from: date)
     }
 
+    /// 格式化精确到分钟的完整日期时间。
     static func formatDateTime(_ date: Date) -> String {
         dateTimeFormatter.string(from: date)
     }
 
+    /// 格式化列表里常用的相对简写日期时间。
     static func formatRelativeDateTime(_ date: Date) -> String {
         relativeFormatter.string(from: date)
     }
 
+    /// 直接把 `HH:mm` 文本转成分钟数。
     static func minutesOfDay(from string: String) -> Int {
         TimeSlot.parseMinutes(string)
     }
 
+    /// 把系统 weekday 映射成项目内部使用的“周一=1 ... 周日=7”。
     static func weekdayIndex(from date: Date) -> Int {
         let weekday = calendar.component(.weekday, from: date)
         return ((weekday + 5) % 7) + 1
     }
 
+    /// 读取某个 `Date` 在一天中的分钟偏移。
     static func minutesOfDay(from date: Date) -> Int {
         let components = calendar.dateComponents([.hour, .minute], from: date)
         return (components.hour ?? 0) * 60 + (components.minute ?? 0)
@@ -410,6 +458,9 @@ enum ScheduleCacheStore {
         return decoder
     }()
 
+    /// 当前账号对应的缓存文件路径。
+    ///
+    /// 课表、DDL 和灵动岛设置都已按账号隔离，所以路径会带当前学号。
     private static var fileURL: URL {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let directory = root
@@ -418,6 +469,7 @@ enum ScheduleCacheStore {
         return directory.appending(path: "schedule-cache.json")
     }
 
+    /// 把当前学号转换成安全的目录名。
     private static func currentAccountIdentifier() -> String {
         let raw = LoginStorage.shared.currentStudentID.trimmingCharacters(in: .whitespacesAndNewlines)
         if raw.isEmpty {
@@ -428,6 +480,7 @@ enum ScheduleCacheStore {
         return raw.components(separatedBy: invalid).joined(separator: "_")
     }
 
+    /// 读取当前账号的缓存快照。
     static func load() -> ScheduleCache {
         guard
             let data = try? Data(contentsOf: fileURL),
@@ -439,6 +492,7 @@ enum ScheduleCacheStore {
         return cache
     }
 
+    /// 写回缓存，并同步触发小组件导出和全局变更通知。
     static func save(_ cache: ScheduleCache) {
         let url = fileURL
         let directory = url.deletingLastPathComponent()
@@ -456,6 +510,9 @@ enum ScheduleCacheStore {
         }
     }
 
+    /// 清空当前账号的日程缓存。
+    ///
+    /// 这里不会碰其它账号目录，避免多账号切换后互相误删数据。
     static func clear() {
         let url = fileURL
         let directory = url.deletingLastPathComponent()

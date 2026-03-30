@@ -38,12 +38,17 @@ private enum LoginURLUpgrade {
 }
 
 /// 本地保存的登录凭据。
+///
+/// 这里只保存“足以静默重登学校 SSO”的最小信息组合，不额外混入 fake-cookie 等会话态。
 struct StoredCredentials {
     let studentID: String
     let password: String
 }
 
 /// 从学校登录页里解析出来的必要上下文。
+///
+/// 学校 CAS 登录页并不是一个稳定 JSON 接口，而是一段 HTML，所以这里先把后续登录真正
+/// 需要的字段提炼成一个小结构体，供业务层继续往下传。
 struct SchoolLoginContext {
     let salt: String?
     let execution: String?
@@ -93,18 +98,24 @@ final class LoginStorage {
     private let defaults = UserDefaults.standard
     private let cookieStorage = HTTPCookieStorage.shared
 
+    /// 通知全局“当前账号相关数据已变化”。
+    ///
+    /// 课表缓存、小组件、设置隔离等都依赖这条通知做账号切换刷新。
     private func notifyAccountChanged() {
         NotificationCenter.default.post(name: .loginStorageDidChange, object: nil)
     }
 
+    /// BIT101 自有登录态使用的 fake-cookie。
     var fakeCookie: String {
         defaults.string(forKey: DefaultsKey.fakeCookie) ?? ""
     }
 
+    /// 当前本地保存的学号。
     var currentStudentID: String {
         (try? readKeychainValue(account: KeychainAccount.studentID)) ?? ""
     }
 
+    /// 当前本地保存的密码。
     var currentPassword: String {
         (try? readKeychainValue(account: KeychainAccount.password)) ?? ""
     }
@@ -122,6 +133,9 @@ final class LoginStorage {
     }
 
     /// 保存登录成功后的本地会话。
+    ///
+    /// 这里既保存可长期复用的账号密码，也保存当前 fake-cookie。这样应用重启后既可以
+    /// 直接乐观进入主界面，又能在后台必要时静默重登学校 SSO。
     func saveLoginState(studentID: String, password: String, fakeCookie: String) throws {
         try saveKeychainValue(studentID, account: KeychainAccount.studentID)
         try saveKeychainValue(password, account: KeychainAccount.password)
@@ -130,6 +144,8 @@ final class LoginStorage {
     }
 
     /// 清理当前会话，但保留账号密码，方便下次乐观进入主界面。
+    ///
+    /// 这是“退出登录但不清空凭据”的语义，主要用于发现远端会话失效时快速回到未登录态。
     func clearSession() {
         defaults.removeObject(forKey: DefaultsKey.fakeCookie)
 
@@ -139,6 +155,8 @@ final class LoginStorage {
     }
 
     /// 删除客户端本地保存的所有登录相关数据。
+    ///
+    /// 这是更彻底的“清文稿与数据”语义，会同时抹掉 Keychain 中的账号密码。
     func clearAllLocalData() {
         defaults.removeObject(forKey: DefaultsKey.fakeCookie)
         cookieStorage.cookies?.forEach { cookieStorage.deleteCookie($0) }
@@ -209,6 +227,8 @@ final class LoginStorage {
 }
 
 /// Android 端登录流程依赖的加密算法。
+///
+/// iOS 端为了兼容现有后端和学校登录链路，需要严格复刻 Android 端的密码处理逻辑。
 enum LoginCrypto {
     /// 复刻 Android 端的 AES 加密逻辑，用于学校登录表单和 WebVPN 校验。
     static func encryptPassword(_ password: String, saltBase64: String) throws -> String {
@@ -259,6 +279,8 @@ enum LoginCrypto {
 }
 
 /// 从学校 CAS 登录页 HTML 中抽取 salt 和 execution。
+///
+/// 学校登录页不是稳定 API，因此这层解析需要尽量宽松，只抽真正必要的几个字段。
 enum SchoolLoginHTMLParser {
     /// 从学校 CAS 登录页 HTML 中提取 salt、execution 和“是否已登录”状态。
     static func parse(html: String) -> SchoolLoginContext {
@@ -287,10 +309,12 @@ enum SchoolLoginHTMLParser {
     }
 }
 
+/// WebVPN 校验初始化请求体。
 fileprivate struct WebVPNVerifyInitRequest: Encodable {
     let sid: String
 }
 
+/// WebVPN 校验初始化响应。
 fileprivate struct WebVPNVerifyInitResponse: Decodable {
     let captcha: String
     let cookie: String
@@ -298,6 +322,7 @@ fileprivate struct WebVPNVerifyInitResponse: Decodable {
     let salt: String
 }
 
+/// WebVPN 校验请求体。
 fileprivate struct WebVPNVerifyRequest: Encodable {
     let sid: String
     let password: String
@@ -307,11 +332,13 @@ fileprivate struct WebVPNVerifyRequest: Encodable {
     let captcha: String
 }
 
+/// WebVPN 校验结果。
 fileprivate struct WebVPNVerifyResponse: Decodable {
     let token: String
     let code: String
 }
 
+/// BIT101 登录模式注册请求体。
 fileprivate struct RegisterRequest: Encodable {
     let password: String
     let token: String
@@ -319,6 +346,7 @@ fileprivate struct RegisterRequest: Encodable {
     let loginMode: Bool
 }
 
+/// BIT101 登录模式注册响应。
 fileprivate struct RegisterResponse: Decodable {
     let fakeCookie: String
 }
@@ -378,6 +406,11 @@ struct BIT101APIClient {
     private let noRedirectDelegate = NoRedirectDelegate()
     private let redirectDelegate = HTTPSRedirectDelegate()
 
+    /// 构造两套会话：
+    /// 1. 正常跟随重定向
+    /// 2. 手动接管 302
+    ///
+    /// 学校 SSO 链路里两种模式都会用到，所以在这里一次性准备好。
     init() {
         let configuration = URLSessionConfiguration.default
         configuration.httpCookieStorage = HTTPCookieStorage.shared
@@ -403,6 +436,8 @@ struct BIT101APIClient {
     }
 
     /// 拉取学校登录页并解析出后续登录所需上下文。
+    ///
+    /// 这里不会做任何缓存，因为学校 CAS 的 salt/execution 都是一次性的。
     func fetchSchoolLoginContext() async throws -> SchoolLoginContext {
         var request = URLRequest(url: schoolBaseURL.appending(path: "cas/login"))
         request.httpMethod = "GET"
@@ -454,6 +489,9 @@ struct BIT101APIClient {
     }
 
     /// 手动补走学校侧 SSO 的 302 链路，确保相关学校 cookie 真正落盘。
+    ///
+    /// 如果缺了这一步，后续看起来像“学校登录成功了”，但教务/乐学接口依赖的学校 cookie
+    /// 实际上还没完整写入，会导致部分功能在进入主界面后再失败。
     private func finishSchoolLoginRedirectChain(from location: String, relativeTo baseURL: URL) async throws {
         guard var nextURL = LoginURLUpgrade.resolvedURL(from: location, relativeTo: baseURL) else {
             return
@@ -487,6 +525,7 @@ struct BIT101APIClient {
         }
     }
 
+    /// 初始化 WebVPN 校验上下文。
     fileprivate func webVPNVerifyInit(studentID: String) async throws -> WebVPNVerifyInitResponse {
         try await sendJSONRequest(
             url: bit101BaseURL.appending(path: "user/webvpn_verify_init"),
@@ -495,6 +534,7 @@ struct BIT101APIClient {
         )
     }
 
+    /// 提交 WebVPN 校验。
     fileprivate func webVPNVerify(studentID: String, password: String, execution: String, cookie: String, salt: String) async throws -> WebVPNVerifyResponse {
         try await sendJSONRequest(
             url: bit101BaseURL.appending(path: "user/webvpn_verify"),
@@ -510,6 +550,7 @@ struct BIT101APIClient {
         )
     }
 
+    /// 以“登录模式”完成 BIT101 自身注册/登录。
     fileprivate func register(password: String, token: String, code: String) async throws -> RegisterResponse {
         try await sendJSONRequest(
             url: bit101BaseURL.appending(path: "user/register"),
@@ -556,6 +597,8 @@ struct BIT101APIClient {
     }
 
     /// 发送 JSON 请求并自动解码响应体。
+    ///
+    /// 登录链路里的 BIT101 自有接口都走这条路径：编码 body、发送请求、检查状态码、解码响应。
     private func sendJSONRequest<Body: Encodable, Response: Decodable>(
         url: URL,
         method: String,
@@ -579,6 +622,8 @@ struct BIT101APIClient {
     }
 
     /// 根据是否允许跟随重定向，选择合适的 `URLSession` 并统一做 HTTPS 升级。
+    ///
+    /// 这里是整个登录链路里最核心的网络入口，学校接口和 BIT101 接口最终都从这里出。
     private func sendRequest(_ request: URLRequest, followRedirects: Bool) async throws -> (Data, HTTPURLResponse) {
         let data: Data
         let response: URLResponse
@@ -607,6 +652,8 @@ struct BIT101APIClient {
     }
 
     /// 把表单字段编码成 `application/x-www-form-urlencoded` 数据。
+    ///
+    /// 学校 CAS 登录表单不收 JSON，因此需要保留这条传统表单编码路径。
     private func formBody(_ fields: [(String, String)]) -> Data {
         let encoded = fields
             .map { key, value in
@@ -679,6 +726,7 @@ struct LoginService {
     private let storage: LoginStorage
     private let apiClient: BIT101APIClient
 
+    /// 允许注入存储和 API 客户端，方便测试或将来替换实现。
     init(storage: LoginStorage = .shared, apiClient: BIT101APIClient = BIT101APIClient()) {
         self.storage = storage
         self.apiClient = apiClient
@@ -752,6 +800,8 @@ struct LoginService {
     }
 
     /// 执行完整登录流程：学校 CAS -> BIT101 WebVPN 校验 -> 登录模式注册。
+    ///
+    /// 这里严格按 Android 现有顺序执行，保证 iOS 端与现有后端约定保持一致。
     func login(studentID: String, password: String) async throws -> String {
         storage.clearSession()
 

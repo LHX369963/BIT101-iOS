@@ -1,6 +1,8 @@
 import Foundation
 
 /// 原生成绩查询的统一错误定义。
+///
+/// 成绩页直接面向用户展示错误，所以这里尽量把底层异常折叠成少量可理解的文案。
 enum ScoreServiceError: LocalizedError {
     case missingCredentials
     case invalidResponse
@@ -23,6 +25,8 @@ enum ScoreServiceError: LocalizedError {
 /// 直接使用已保存的学号和统一认证密码请求 `bit_login_url`，不再依赖 WebView 自动填充。
 struct ScoreService {
     /// 成绩查询接口的请求体。
+    ///
+    /// `detail=true` 会要求代理返回更完整的二维表，便于 iOS 端自行做筛选和详情展示。
     private struct ScoreRequest: Encodable {
         let username: String
         let password: String
@@ -30,6 +34,8 @@ struct ScoreService {
     }
 
     /// 成绩查询接口的响应体。
+    ///
+    /// 当前接口约定 `data[0]` 是表头，后续每一行对应一条课程成绩。
     private struct ScoreResponse: Decodable {
         let msg: String?
         let data: [[String]]
@@ -37,8 +43,14 @@ struct ScoreService {
 
     private let storage: LoginStorage
     private let session: URLSession
+    /// 成绩代理服务基地址。
+    ///
+    /// 默认走线上代理；如 `Info.plist` 提供了覆写地址，则优先使用覆写值。
     private let endpointBaseURL: URL
 
+    /// 初始化成绩服务。
+    ///
+    /// 这里不复用主站 fake-cookie，而是直接读取已保存的学号和统一认证密码去请求成绩代理。
     init(storage: LoginStorage = .shared) {
         self.storage = storage
         self.session = URLSession(configuration: .default)
@@ -55,6 +67,8 @@ struct ScoreService {
     }
 
     /// 调用成绩接口并把二维表转成 `ScoreRow` 数组。
+    ///
+    /// 接口第一行是表头，后续每一行都是同一列顺序的成绩值。
     func fetchScores(detail: Bool) async throws -> [ScoreRow] {
         let studentID = storage.currentStudentID.trimmingCharacters(in: .whitespacesAndNewlines)
         let password = storage.currentPassword
@@ -103,6 +117,8 @@ struct ScoreService {
     }
 
     /// 尝试从错误响应 JSON 中提取更具体的错误文案。
+    ///
+    /// 成绩代理失败时有时会返回纯文本，有时会返回 JSON，这里两种都兼容。
     private func messageFromErrorResponse(_ data: Data) -> String? {
         guard
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]

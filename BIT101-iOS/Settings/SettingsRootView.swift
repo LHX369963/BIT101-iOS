@@ -34,6 +34,8 @@ SOFTWARE.
 """
 
 /// 设置中心支持的一级菜单。
+///
+/// “设置首页卡片”与“从其它页面直达某一设置子页”都依赖这个枚举作为统一路由源。
 enum SettingsRoute: String, CaseIterable, Identifiable {
     case account
     case pages
@@ -104,6 +106,8 @@ struct SettingsRootView: View {
 }
 
 /// 设置首页，负责列出全部一级菜单。
+///
+/// 这里仍然保留卡片式入口，而不是直接用 `List`，是为了和“我的”页的入口风格区分开。
 private struct SettingsIndexPage: View {
     let studentID: String
     let onLogout: () -> Void
@@ -154,6 +158,8 @@ private struct SettingsIndexCard: View {
 }
 
 /// 根据 route 分发到具体设置页面。
+///
+/// 这一层的意义是把“路由选择”和“具体页面实现”解耦，便于其它模块直接按 route 深链进来。
 private struct SettingsRoutePage: View {
     let route: SettingsRoute
     let studentID: String
@@ -301,6 +307,7 @@ private struct AccountSettingsPage: View {
         }
     }
 
+    /// 拉取当前登录用户资料卡。
     private func loadProfile() async {
         do {
             profile = try await service.fetchMyInfo()
@@ -310,6 +317,7 @@ private struct AccountSettingsPage: View {
         }
     }
 
+    /// 触发一次显式登录状态检查。
     private func checkLogin() async {
         isCheckingLogin = true
         defer { isCheckingLogin = false }
@@ -320,6 +328,9 @@ private struct AccountSettingsPage: View {
         }
     }
 
+    /// 更新昵称或签名。
+    ///
+    /// 接口要求整份资料一起提交，所以未改动字段也要回填旧值。
     private func updateProfile(nickname: String?, motto: String?) async {
         guard let profile else { return }
         isUpdating = true
@@ -338,6 +349,7 @@ private struct AccountSettingsPage: View {
         }
     }
 
+    /// 上传并绑定新头像。
     private func updateAvatar(with item: PhotosPickerItem) async {
         guard let profile else { return }
         isUpdating = true
@@ -361,6 +373,8 @@ private struct AccountSettingsPage: View {
 }
 
 /// 设置页里用于按需显示学号、UID 这类敏感标识。
+///
+/// 默认做轻度模糊，点击后再完全展开，避免在公共场合一眼暴露账号信息。
 private struct SettingsSensitiveValueRow: View {
     let title: String
     let value: String
@@ -457,12 +471,14 @@ private struct PagesSettingsPage: View {
         .task { syncFromStore() }
     }
 
+    /// 把当前全局设置同步到本页可编辑状态。
     private func syncFromStore() {
         pageOrder = settings.pageOrder
         homeTab = settings.homeTab
         hiddenTabs = Set(settings.hiddenTabs)
     }
 
+    /// 把当前页面编辑结果一次性写回设置仓库。
     private func persist() {
         settings.setPageOrder(pageOrder)
         settings.setHiddenTabs(Array(hiddenTabs))
@@ -471,6 +487,8 @@ private struct PagesSettingsPage: View {
 }
 
 /// 外观设置页。
+///
+/// 目前只保留外观模式和自动旋转两项全局开关。
 private struct ThemeSettingsPage: View {
     @ObservedObject private var settings = AppSettingsStore.shared
 
@@ -496,6 +514,8 @@ private struct ThemeSettingsPage: View {
 }
 
 /// 课程表设置页。
+///
+/// 这里既承载“数据同步入口”，也承载“课表显示项”和“灵动岛提醒”相关配置。
 private struct CalendarSettingsPage: View {
     @StateObject private var viewModel = ScheduleViewModel()
     @State private var isShowingTimeTableEditor = false
@@ -634,6 +654,8 @@ private struct CourseLiveActivityLeadMinutesPickerPage: View {
 }
 
 /// DDL 设置页。
+///
+/// 这页只负责 DDL 同步和显示窗口配置，不再混入新增/编辑入口。
 private struct DDLSettingsPage: View {
     @StateObject private var viewModel = ScheduleViewModel()
 
@@ -742,6 +764,7 @@ private struct GallerySettingsPage: View {
         }
     }
 
+    /// 批量加载已隐藏用户的公开资料，供列表展示昵称和头像。
     private func loadHiddenUsers() async {
         isLoadingUsers = true
         defer { isLoadingUsers = false }
@@ -763,6 +786,8 @@ private struct GallerySettingsPage: View {
 }
 
 /// 关于页。
+///
+/// 这里集中放版本、致谢、联系方式、开源声明以及本地数据清理入口。
 private struct AboutSettingsPage: View {
     let onLogout: () -> Void
 
@@ -836,6 +861,7 @@ private struct AboutSettingsPage: View {
         }
     }
 
+    /// 清空本地所有用户数据，并退回登录页。
     @MainActor
     private func resetAllLocalData() async {
         guard !isResettingLocalData else { return }
@@ -852,6 +878,7 @@ private struct AboutSettingsPage: View {
         onLogout()
     }
 
+    /// 清空 bundle 对应的 `UserDefaults` 域。
     private func clearUserDefaults() {
         if let bundleID = Bundle.main.bundleIdentifier {
             UserDefaults.standard.removePersistentDomain(forName: bundleID)
@@ -859,6 +886,7 @@ private struct AboutSettingsPage: View {
         }
     }
 
+    /// 清空常见本地目录里的缓存与文稿。
     private func clearFileSystemCaches() {
         let manager = FileManager.default
         let directories: [FileManager.SearchPathDirectory] = [
@@ -875,6 +903,7 @@ private struct AboutSettingsPage: View {
         deleteContents(of: manager.temporaryDirectory, using: manager)
     }
 
+    /// 删除某个目录下的可见内容。
     private func deleteContents(of directory: URL, using manager: FileManager) {
         guard let urls = try? manager.contentsOfDirectory(
             at: directory,
@@ -889,6 +918,7 @@ private struct AboutSettingsPage: View {
         }
     }
 
+    /// 清空 `WKWebView` 相关站点数据。
     private func clearWebData() async {
         let dataTypes = WKWebsiteDataStore.allWebsiteDataTypes()
         await withCheckedContinuation { continuation in
@@ -903,6 +933,8 @@ private struct AboutSettingsPage: View {
 }
 
 /// 文本编辑弹层。
+///
+/// 昵称和个性签名都共用这一套简单编辑器。
 private struct SettingsTextEditSheet: View {
     let title: String
     @Binding var text: String
@@ -933,6 +965,8 @@ private struct SettingsTextEditSheet: View {
 }
 
 /// 隐藏用户列表页。
+///
+/// 这里只负责展示和恢复，不再重复关心隐藏逻辑本身。
 private struct HiddenUsersPage: View {
     let hiddenUsers: [MineUserInfo]
     let isLoading: Bool
@@ -973,6 +1007,8 @@ private struct HiddenUsersPage: View {
 }
 
 /// 隐藏帖子列表页。
+///
+/// 恢复显示后，真正的数据修改由 `AppSettingsStore` 负责完成。
 private struct HiddenPostersPage: View {
     let hiddenPosters: [HiddenPosterRecord]
     let onReshow: (Int) -> Void

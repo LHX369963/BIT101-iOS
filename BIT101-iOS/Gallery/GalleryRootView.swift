@@ -14,8 +14,11 @@ import UIKit
 ///
 /// 顶部负责 feed 切换，下方负责承载当前选中的帖子流，并支持左右轻扫切换分区。
 struct GalleryRootView: View {
+    /// 主 feed 视图模型，负责帖子流、搜索和详情入口状态。
     @StateObject private var viewModel = GalleryViewModel()
+    /// 消息中心视图模型，与主 feed 独立，避免互相污染加载状态。
     @StateObject private var messageViewModel = GalleryMessageViewModel()
+    /// 全局话廊设置快照。
     @ObservedObject private var settings = AppSettingsStore.shared
     @State private var isShowingComposer = false
     @State private var isShowingMessages = false
@@ -119,12 +122,19 @@ struct GalleryRootView: View {
         return state
     }
 
+    /// 右下角消息按钮上的红点文案。
+    ///
+    /// 这里统一在入口处裁到 `99+`，避免按钮本身因为长数字撑坏布局。
     private var messageBadgeText: String? {
         let count = messageViewModel.totalUnreadCount
         guard count > 0 else { return nil }
         return count > 99 ? "99+" : String(count)
     }
 
+    /// feed 左右轻扫切换手势。
+    ///
+    /// 这里没有使用系统 pager，而是保留当前“底部全覆盖 + 顶部 segmented”的布局，
+    /// 通过横向拖拽手势做轻量切换。
     private var feedSwitchGesture: some Gesture {
         DragGesture(minimumDistance: 24, coordinateSpace: .local)
             .onEnded { value in
@@ -141,6 +151,7 @@ struct GalleryRootView: View {
             }
     }
 
+    /// 把当前 feed 切换到相邻分区。
     private func switchFeed(step: Int) {
         let allFeeds = GalleryFeedKind.allCases
         guard let currentIndex = allFeeds.firstIndex(of: viewModel.selectedFeed) else { return }
@@ -159,6 +170,20 @@ struct GalleryRootView: View {
     }
 }
 
+/// 记录当前列表里“最靠近顶部的帖子”的垂直偏移。
+///
+/// 下拉刷新后会用它来恢复用户原先的阅读位置，减少刷新导致的“跳走感”。
+private struct GalleryVisiblePosterOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue: [Int: CGFloat] = [:]
+
+    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+/// 统一的右下角悬浮操作按钮。
+///
+/// 主 feed、搜索、消息等入口都复用这一套胶囊按钮样式。
 private struct GalleryFloatingActionButton: View {
     let systemImage: String
     let badgeText: String?
@@ -195,6 +220,15 @@ private struct GalleryFloatingActionButton: View {
 }
 
 /// 单个 feed 的列表页。
+///
+/// 这个视图同时承担了：
+/// 1. 列表展示
+/// 2. 下拉刷新
+/// 3. 预取和分页触发
+/// 4. 刷新后滚动位置恢复
+/// 5. 帖子详情、举报、看图等二级交互入口
+///
+/// 因此它是 `GalleryRootView` 中最关键的子视图。
 private struct GalleryFeedView: View {
     let feedState: GalleryFeedState
     let feedIdentity: String
@@ -208,99 +242,118 @@ private struct GalleryFeedView: View {
     @State private var imageViewer: GalleryImageViewerState?
     @State private var reportContext: GalleryReportContext?
     @State private var deletedPosterIDs: Set<Int> = []
+    @State private var currentTopPosterID: Int?
+    @State private var pendingRestorePosterID: Int?
 
     var body: some View {
-        Group {
-            if isInitialLoading {
-                    ProgressView("正在加载话廊")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if case let .failed(message) = feedState.status, feedState.posters.isEmpty {
-                ContentUnavailableView {
-                    Label("加载失败", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(message)
-                }
-            } else {
-                List {
-                    ForEach(Array(visiblePosters.enumerated()), id: \.element.id) { index, poster in
-                        VStack(spacing: 0) {
-                            GalleryPosterCard(
-                                poster: poster,
-                                onOpenPoster: { selectedPoster = poster },
-                                onOpenImage: { index, images in
-                                    imageViewer = GalleryImageViewerState(images: images, initialIndex: index)
-                                },
-                                onReport: { action in
-                                    reportContext = GalleryReportContext(poster: poster, action: action)
-                                },
-                                onDelete: nil
-                            )
+        ScrollViewReader { proxy in
+            Group {
+                if isInitialLoading {
+                        ProgressView("正在加载话廊")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if case let .failed(message) = feedState.status, feedState.posters.isEmpty {
+                    ContentUnavailableView {
+                        Label("加载失败", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text(message)
+                    }
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(Array(visiblePosters.enumerated()), id: \.element.id) { index, poster in
+                                VStack(spacing: 0) {
+                                    GalleryPosterCard(
+                                        poster: poster,
+                                        onOpenPoster: { selectedPoster = poster },
+                                        onOpenImage: { index, images in
+                                            imageViewer = GalleryImageViewerState(images: images, initialIndex: index)
+                                        },
+                                        onReport: { action in
+                                            reportContext = GalleryReportContext(poster: poster, action: action)
+                                        },
+                                        onDelete: nil
+                                    )
 
-                            if index != visiblePosters.count - 1 {
-                                Divider()
-                                    .padding(.leading, 14)
-                            }
-                        }
-                        .listRowInsets(EdgeInsets())
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
-                        .onAppear {
-                            if prefetchTriggerPosterIDs.contains(poster.id) {
-                                Task {
-                                    await onPrefetch(poster)
+                                    if index != visiblePosters.count - 1 {
+                                        Divider()
+                                            .padding(.leading, 14)
+                                    }
+                                }
+                                .id(poster.id)
+                                .background(
+                                    GeometryReader { geometry in
+                                        Color.clear.preference(
+                                            key: GalleryVisiblePosterOffsetPreferenceKey.self,
+                                            value: [poster.id: geometry.frame(in: .named(feedScrollSpaceName)).minY]
+                                        )
+                                    }
+                                )
+                                .onAppear {
+                                    if prefetchTriggerPosterIDs.contains(poster.id) {
+                                        Task {
+                                            await onPrefetch(poster)
+                                        }
+                                    }
+                                    guard poster.id == visiblePosters.last?.id else { return }
+                                    Task {
+                                        await onLoadMore(poster)
+                                    }
                                 }
                             }
-                            guard poster.id == visiblePosters.last?.id else { return }
-                            Task {
-                                await onLoadMore(poster)
+
+                            if feedState.isLoadingMore {
+                                HStack {
+                                    Spacer()
+                                    ProgressView()
+                                    Spacer()
+                                }
+                                .padding(.vertical, 12)
                             }
                         }
+                        .scrollTargetLayout()
                     }
-
-                    if feedState.isLoadingMore {
-                        HStack {
-                            Spacer()
-                            ProgressView()
-                            Spacer()
-                        }
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
-                    }
-                }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .background(Color(.systemGroupedBackground))
-                .id(feedIdentity)
-                .refreshable {
-                    await onRefresh()
-                }
-            }
-        }
-        .background(Color(.systemGroupedBackground))
-        .sheet(item: $selectedPoster) { poster in
-            NavigationStack {
-                GalleryPosterDetailView(
-                    poster: poster,
-                    onReport: { _ in },
-                    onDeleted: {
-                        deletedPosterIDs.insert(poster.id)
+                    .coordinateSpace(name: feedScrollSpaceName)
+                    .background(Color(.systemGroupedBackground))
+                    .id(feedIdentity)
+                    .refreshable {
+                        pendingRestorePosterID = currentTopPosterID ?? visiblePosters.first?.id
                         await onRefresh()
                     }
-                )
+                    .onPreferenceChange(GalleryVisiblePosterOffsetPreferenceKey.self) { offsets in
+                        currentTopPosterID = topVisiblePosterID(from: offsets)
+                    }
+                    .onChange(of: visiblePosterIDs) { _, newIDs in
+                        restoreScrollPositionIfNeeded(with: proxy, availableIDs: newIDs)
+                    }
+                }
             }
-            .presentationDetents([.large])
-            .presentationDragIndicator(.hidden)
-        }
-        .fullScreenCover(item: $imageViewer) { viewer in
-            GalleryImageViewer(viewer: viewer)
-        }
-        .sheet(item: $reportContext) { context in
-            CommunityReportSheet(context: context) { type, note in
-                applyReport(context, type: type, note: note)
+            .background(Color(.systemGroupedBackground))
+            .sheet(item: $selectedPoster) { poster in
+                NavigationStack {
+                    GalleryPosterDetailView(
+                        poster: poster,
+                        onReport: { _ in },
+                        onDeleted: {
+                            deletedPosterIDs.insert(poster.id)
+                            await onRefresh()
+                        }
+                    )
+                }
+                .presentationDetents([.large])
+                .presentationDragIndicator(.hidden)
+            }
+            .fullScreenCover(item: $imageViewer) { viewer in
+                GalleryImageViewer(viewer: viewer)
+            }
+            .sheet(item: $reportContext) { context in
+                CommunityReportSheet(context: context) { type, note in
+                    applyReport(context, type: type, note: note)
+                }
             }
         }
     }
 
+    /// 首屏空态下是否应该显示中央加载指示器。
     private var isInitialLoading: Bool {
         switch feedState.status {
         case .idle, .loading:
@@ -310,15 +363,84 @@ private struct GalleryFeedView: View {
         }
     }
 
+    /// 当前真正可见的帖子列表。
+    ///
+    /// 删帖成功后会先做本地移除，再等待上层刷新；因此这里要叠加一层
+    /// `deletedPosterIDs` 过滤，保证体感上帖子会立刻消失。
     private var visiblePosters: [GalleryPoster] {
         feedState.posters.filter { !deletedPosterIDs.contains($0.id) }
     }
 
+    private var visiblePosterIDs: [Int] {
+        visiblePosters.map(\.id)
+    }
+
+    /// 进入可见列表尾部若干条时触发的预取集合。
+    ///
+    /// 预取只负责后台准备下一页，不直接把数据拼到列表里，这样可以降低滚动条比例
+    /// 和当前位置突然变化带来的“跳走”感。
     private var prefetchTriggerPosterIDs: Set<Int> {
         guard prefetchTriggerThreshold > 0 else { return [] }
         return Set(visiblePosters.suffix(prefetchTriggerThreshold).map(\.id))
     }
 
+    /// 当前 feed 独立的滚动坐标空间名称。
+    private var feedScrollSpaceName: String {
+        "GalleryFeedScroll-\(feedIdentity)"
+    }
+
+    /// 根据偏移字典推断当前位于屏幕顶部附近的帖子。
+    ///
+    /// 算法选择“距离 0 最近的 minY”，这样不需要真正知道可见区域高度，
+    /// 也能粗略定位用户当时正在阅读哪一条。
+    private func topVisiblePosterID(from offsets: [Int: CGFloat]) -> Int? {
+        guard !offsets.isEmpty else { return currentTopPosterID }
+
+        return offsets.min { lhs, rhs in
+            let lhsDistance = abs(lhs.value)
+            let rhsDistance = abs(rhs.value)
+            if lhsDistance == rhsDistance {
+                return lhs.value < rhs.value
+            }
+            return lhsDistance < rhsDistance
+        }?.key
+    }
+
+    /// 刷新完成后，把滚动位置尽量恢复到刷新前的顶部帖子。
+    ///
+    /// 如果原帖子还在，就精确恢复；如果已经不在当前列表里，则退回到当前列表第一条，
+    /// 至少避免页面直接跳到完全不可预期的位置。
+    private func restoreScrollPositionIfNeeded(with proxy: ScrollViewProxy, availableIDs: [Int]) {
+        guard let pendingRestorePosterID else { return }
+
+        if availableIDs.contains(pendingRestorePosterID) {
+            DispatchQueue.main.async {
+                scrollToTopPoster(pendingRestorePosterID, with: proxy)
+                self.pendingRestorePosterID = nil
+            }
+        } else if let fallbackID = availableIDs.first {
+            DispatchQueue.main.async {
+                scrollToTopPoster(fallbackID, with: proxy)
+                self.pendingRestorePosterID = nil
+            }
+        } else {
+            self.pendingRestorePosterID = nil
+        }
+    }
+
+    /// 无动画滚回指定帖子顶部。
+    ///
+    /// 这里禁用动画是有意的：刷新完成后的补位应该尽量“静默”，否则用户会明显感知到
+    /// 页面被强行滚动。
+    private func scrollToTopPoster(_ posterID: Int, with proxy: ScrollViewProxy) {
+        var transaction = Transaction()
+        transaction.animation = nil
+        withTransaction(transaction) {
+            proxy.scrollTo(posterID, anchor: .top)
+        }
+    }
+
+    /// 应用“举报并隐藏 / 举报并屏蔽用户”的本地治理动作，再异步上报。
     private func applyReport(_ context: GalleryReportContext, type: CommunityReportType, note: String) {
         switch context.action {
         case .hidePoster:
@@ -456,12 +578,15 @@ struct GalleryPosterCard: View {
         Color(hex: poster.user.identity.color) ?? .orange
     }
 
+    /// 把后端时间文本转成相对时间文案。
     private func relativeTimeText(_ string: String) -> String {
         GalleryDateDecoder.relativeText(from: string, fallback: "未知")
     }
 }
 
 /// 帖子作者头像。
+///
+/// 头像统一走 `CachedRemoteImage`，避免频繁出现在信息流里的用户头像每次冷启动都重新下载。
 private struct GalleryAvatarView: View {
     let imageURL: URL?
 
@@ -484,6 +609,11 @@ private struct GalleryAvatarView: View {
 }
 
 /// 帖子图片网格。
+///
+/// 这里故意按图片数量做三套布局，而不是一律九宫格：
+/// - 1 张图时尽量给更大的阅读空间
+/// - 2 张图时用并排双列
+/// - 3 张及以上再退回网格
 private struct GalleryPosterImagesView: View {
     let images: [GalleryImage]
     let onOpenImage: (Int, [GalleryImage]) -> Void
@@ -555,6 +685,12 @@ private struct GalleryPosterThumbnail: View {
 }
 
 /// 帖子详情页。
+///
+/// 详情页是一个相对完整的“二级页面壳层”：
+/// - 顶部帖子正文和互动按钮
+/// - 评论列表与排序
+/// - 举报、删帖、看图、评论输入
+/// - 点击作者或评论作者跳到用户主页
 struct GalleryPosterDetailView: View {
     private struct UserRoute: Identifiable, Hashable {
         let userID: Int
@@ -797,6 +933,7 @@ struct GalleryPosterDetailView: View {
         }
     }
 
+    /// 详情页顶部作者信息区域。
     private var authorSummary: some View {
         HStack(spacing: 12) {
             GalleryAvatarView(imageURL: URL(string: viewModel.poster.user.avatar.lowUrl.isEmpty ? viewModel.poster.user.avatar.url : viewModel.poster.user.avatar.lowUrl))
@@ -816,6 +953,7 @@ struct GalleryPosterDetailView: View {
         }
     }
 
+    /// 当前帖子作者是否允许跳转到用户主页。
     private var canOpenPosterUserProfile: Bool {
         !viewModel.poster.anonymous && viewModel.poster.user.id > 0
     }
@@ -828,6 +966,7 @@ struct GalleryPosterDetailView: View {
         CommunityModeration.filterVisibleComments(viewModel.commentState.items, snapshot: settings.snapshot)
     }
 
+    /// 在详情页里应用举报动作。
     private func applyReport(_ context: GalleryReportContext, type: CommunityReportType, note: String) {
         switch context.action {
         case .hidePoster:
@@ -857,6 +996,9 @@ struct GalleryPosterDetailView: View {
 }
 
 /// 评论区主体。
+///
+/// 这里只负责“评论列表如何展示”，不直接持有评论请求逻辑；请求和排序状态由上层
+/// `GalleryPosterDetailViewModel` 驱动，再通过闭包把操作回传上去。
 private struct GalleryPosterCommentsSection: View {
     let comments: [GalleryComment]
     let totalCommentCount: Int
@@ -955,12 +1097,17 @@ private struct GalleryPosterCommentsSection: View {
 }
 
 /// 评论回复目标。
+///
+/// `mainComment` 表示发评论接口真正要挂靠的主评论，
+/// `targetComment` 表示当前 UI 上用户实际点中的那条评论。
 private struct GalleryCommentReplyTarget {
     let mainComment: GalleryComment
     let targetComment: GalleryComment
 }
 
 /// 单条评论及其子评论预览。
+///
+/// 主评论和子评论共用同一套气泡视图，只是在这一层决定是否渲染嵌套结构。
 private struct GalleryCommentRow: View {
     let comment: GalleryComment
     let likingCommentIDs: Set<Int>
@@ -1024,6 +1171,14 @@ private struct GalleryCommentRow: View {
 }
 
 /// 评论内容气泡。
+///
+/// 一个评论气泡内部同时包含：
+/// - 头像/昵称
+/// - 时间
+/// - 正文
+/// - 图片
+/// - 点赞按钮
+/// - 点击整块回复
 private struct GalleryCommentBubble: View {
     let comment: GalleryComment
     let isSubComment: Bool
@@ -1110,6 +1265,7 @@ private struct GalleryCommentBubble: View {
     }
 
     @ViewBuilder
+    /// 处理“回复某人”的前缀文本拼接。
     private var commentText: some View {
         if comment.replyUser.id != 0, !comment.replyUser.nickname.isEmpty {
             (
@@ -1136,6 +1292,9 @@ private struct GalleryCommentBubble: View {
 }
 
 /// 评论发送弹层。
+///
+/// 评论输入单独做成 sheet，而不是直接贴在详情页底部，是为了避免和 tab bar、抽屉详情、
+/// 键盘安全区互相打架。
 private struct GalleryCommentComposerSheet: View {
     let target: GalleryCommentComposerTarget
     let isSubmitting: Bool
@@ -1178,6 +1337,9 @@ private struct GalleryCommentComposerSheet: View {
 }
 
 /// 搜索页。
+///
+/// 搜索结果页直接复用 `GalleryFeedView`，只是在顶部额外挂一个搜索栏，
+/// 这样搜索结果的分页、详情、举报和看图逻辑都不需要重复实现。
 private struct GallerySearchView: View {
     @ObservedObject var viewModel: GalleryViewModel
     @ObservedObject private var settings = AppSettingsStore.shared
@@ -1371,6 +1533,7 @@ private struct GalleryMessagesView: View {
         }
     }
 
+    /// 消息分类左右切换手势。
     private var messageSwitchGesture: some Gesture {
         DragGesture(minimumDistance: 24, coordinateSpace: .local)
             .onEnded { value in
@@ -1387,12 +1550,14 @@ private struct GalleryMessagesView: View {
             }
     }
 
+    /// 顶部分段标题；有未读时在标题右侧追加计数。
     private func title(for type: GalleryMessageType) -> String {
         let unread = viewModel.unreadCount(for: type)
         guard unread > 0 else { return type.title }
         return unread > 99 ? "\(type.title) 99+" : "\(type.title) \(unread)"
     }
 
+    /// 把消息分类切换到相邻页签。
     private func switchType(step: Int) {
         let allTypes = GalleryMessageType.allCases
         guard let currentIndex = allTypes.firstIndex(of: viewModel.selectedType) else { return }
@@ -1405,6 +1570,10 @@ private struct GalleryMessagesView: View {
         }
     }
 
+    /// 打开单条消息。
+    ///
+    /// 当前服务端消息对象并不保证目标帖子仍然存在，所以这里先尝试拉详情；
+    /// 若帖子已删除，则弹本地提示而不是把用户带进一个“对象不存在”的错误页。
     private func openMessage(_ message: GalleryMessage) async {
         viewModel.markMessageAsRead(message, in: viewModel.selectedType)
 
@@ -1423,6 +1592,9 @@ private struct GalleryMessagesView: View {
 }
 
 /// 单条消息行。
+///
+/// 这里的“新消息”样式是本地伪未读：基于服务端分类未读数推断最新前 N 条，
+/// 不申请系统通知，也不依赖服务端逐条 read 字段。
 private struct GalleryMessageRow: View {
     let type: GalleryMessageType
     let message: GalleryMessage
@@ -1495,6 +1667,8 @@ private struct GalleryMessageRow: View {
 }
 
 /// 消息头像。
+///
+/// 系统消息没有真实用户头像，因此需要根据消息类型回退到一个语义图标。
 private struct GalleryMessageAvatarView: View {
     let user: GalleryMessageUser
     let type: GalleryMessageType
@@ -1515,6 +1689,9 @@ private struct GalleryMessageAvatarView: View {
 }
 
 /// 举报动作的上下文。
+///
+/// 举报 sheet 打开时需要同时知道帖子和动作类型，因此这里用一个小上下文对象
+/// 作为 `sheet(item:)` 的载体。
 private struct GalleryReportContext: Identifiable {
     let poster: GalleryPoster
     let action: CommunityReportAction
@@ -1525,6 +1702,8 @@ private struct GalleryReportContext: Identifiable {
 }
 
 /// 帖子卡片右上角的更多操作菜单。
+///
+/// 举报和删帖都是条件出现的能力，因此统一放在这个菜单里按场景裁剪。
 private struct GalleryPosterActionMenu: View {
     let onSelectAction: ((CommunityReportAction) -> Void)?
     let onDelete: (() -> Void)?
@@ -1664,6 +1843,9 @@ private struct GallerySearchBar: View {
 }
 
 /// 图片查看器当前状态。
+///
+/// 单独抽成状态对象后，信息流和详情页都可以通过 `fullScreenCover(item:)`
+/// 复用同一个图片浏览器。
 struct GalleryImageViewerState: Identifiable {
     let id = UUID()
     let images: [GalleryImage]
@@ -1747,6 +1929,7 @@ private struct GalleryZoomableRemoteImage: UIViewRepresentable {
         private var currentURL: URL?
         private var task: URLSessionDataTask?
 
+        /// 安装 UIKit 子视图层级。
         func install(on scrollView: UIScrollView) {
             imageView.contentMode = .scaleAspectFit
             imageView.backgroundColor = .clear
@@ -1778,6 +1961,7 @@ private struct GalleryZoomableRemoteImage: UIViewRepresentable {
             centerImage(in: scrollView)
         }
 
+        /// 下载远程大图并回填到缩放容器。
         private func loadImage(from url: URL?, in scrollView: UIScrollView) {
             guard let url else { return }
             spinner.startAnimating()
@@ -1794,6 +1978,7 @@ private struct GalleryZoomableRemoteImage: UIViewRepresentable {
             task?.resume()
         }
 
+        /// 根据当前图片和容器尺寸重算初始 frame 与 contentSize。
         private func layoutImage(in scrollView: UIScrollView) {
             scrollView.zoomScale = 1
 
@@ -1810,6 +1995,7 @@ private struct GalleryZoomableRemoteImage: UIViewRepresentable {
             centerImage(in: scrollView)
         }
 
+        /// 在缩放或容器尺寸变化后重新把图片居中。
         private func centerImage(in scrollView: UIScrollView) {
             let boundsSize = scrollView.bounds.size
             var frame = imageView.frame
@@ -1820,6 +2006,7 @@ private struct GalleryZoomableRemoteImage: UIViewRepresentable {
             imageView.frame = frame
         }
 
+        /// 计算图片在当前容器中的 aspect-fit 尺寸。
         private func aspectFitSize(for imageSize: CGSize, in boundsSize: CGSize) -> CGSize {
             guard imageSize.width > 0, imageSize.height > 0, boundsSize.width > 0, boundsSize.height > 0 else {
                 return boundsSize
@@ -1835,6 +2022,9 @@ private struct GalleryZoomableRemoteImage: UIViewRepresentable {
 }
 
 /// 帖子时间文本格式化工具。
+///
+/// 服务端历史上使用过多种时间格式，这里集中做兼容，避免每个视图各自维护
+/// 一套 `DateFormatter`。
 private enum GalleryDateDecoder {
     private static let formatters: [DateFormatter] = [
         makeFormatter("yyyy-MM-dd HH:mm:ss"),

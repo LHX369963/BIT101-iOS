@@ -24,6 +24,9 @@ enum GalleryServiceError: LocalizedError {
 }
 
 /// 机器人分栏的分页结果。
+///
+/// 机器人流并不是后端原生 feed，而是 iOS 侧“从最新流抓几页再本地筛”得到的结果，
+/// 因此需要额外记录“源分页已经推进到哪一页”。
 struct GalleryBotFeedBatch {
     let posters: [GalleryPoster]
     let nextSourcePage: Int
@@ -43,8 +46,10 @@ struct GalleryRecommendFeedBatch {
 ///
 /// 负责帖子流、搜索和与设置中心相关的过滤参数拼接。
 struct GalleryService {
+    /// 话廊相关接口根地址。
     private let baseURL = URL(string: "https://bit101.flwfdd.xyz")!
     private let session: URLSession
+    /// 当前登录态与 fake-cookie 存储。
     private let storage: LoginStorage
 
     /// 发帖接口请求体。
@@ -102,6 +107,10 @@ struct GalleryService {
         let obj: String
     }
 
+    /// 构造带共享 cookie 策略的服务实例。
+    ///
+    /// 话廊接口普遍依赖 fake-cookie，同时又需要继承现有登录 session，
+    /// 因此这里沿用共享 `HTTPCookieStorage`，避免每个服务实例各自维护认证状态。
     init(storage: LoginStorage = .shared) {
         self.storage = storage
 
@@ -113,6 +122,8 @@ struct GalleryService {
     }
 
     /// 拉取某个 feed 的帖子列表。
+    ///
+    /// 普通 feed 直接映射到后端帖子接口；机器人 feed 则走本地特殊分页逻辑。
     func fetchFeed(kind: GalleryFeedKind, page: Int?) async throws -> [GalleryPoster] {
         if kind.isBotFeed {
             let batch = try await fetchBotFeed(startPage: page ?? 0)
@@ -160,6 +171,9 @@ struct GalleryService {
     }
 
     /// 根据搜索关键词和排序条件查询帖子。
+    ///
+    /// 搜索页会读取设置中的“搜索结果隐藏机器人帖子”开关，因此这里需要回主线程
+    /// 拿一份当前设置快照，再决定是否带 `hide_bot`。
     func searchPosters(query: GallerySearchQuery, page: Int?) async throws -> [GalleryPoster] {
         let settings = await MainActor.run {
             AppSettingsStore.loadSnapshotFromDefaults() ?? AppSettingsSnapshot()
@@ -175,6 +189,9 @@ struct GalleryService {
     }
 
     /// 机器人分栏不是服务端原生 feed，这里从“最新”帖子流里向后多抓几页，再筛出机器人帖子。
+    ///
+    /// 机器人帖子在整体帖子流里占比并不高，所以这里采用“多抓几页 + 本地筛”的做法。
+    /// 扫描上限主要是为了避免一次请求链拉得过深，影响滚动体验。
     func fetchBotFeed(startPage: Int) async throws -> GalleryBotFeedBatch {
         var sourcePage = startPage
         var collected: [GalleryPoster] = []
@@ -214,11 +231,15 @@ struct GalleryService {
     }
 
     /// 获取可选的帖子 claim 列表。
+    ///
+    /// claim 会驱动发帖页里的“声明”选择器，因此它属于一个低频但必须成功的基础数据。
     func fetchClaims() async throws -> [GalleryClaim] {
         try await sendJSONRequest(path: "posters/claims")
     }
 
     /// 发送帖子创建请求。
+    ///
+    /// 当前 iOS 端尚未接图片上传和插件，所以 `image_mids` 与 `plugins` 先固定为空。
     func createPoster(
         title: String,
         text: String,
@@ -273,11 +294,15 @@ struct GalleryService {
     }
 
     /// 拉取单个帖子的详情。
+    ///
+    /// 帖子详情会额外包含 `like / own / plugins` 等当前用户态字段，因此不能完全用列表卡片代替。
     func fetchPoster(id: Int) async throws -> GalleryPosterDetail {
         try await sendJSONRequest(path: "posters/\(id)")
     }
 
     /// 删除一条帖子。
+    ///
+    /// 删除接口没有复杂返回体，只以 HTTP 成功与否为准。
     func deletePoster(id: Int) async throws {
         let fakeCookie = storage.fakeCookie
         guard !fakeCookie.isEmpty else {
@@ -309,6 +334,8 @@ struct GalleryService {
     }
 
     /// 拉取帖子或评论对象下的评论列表。
+    ///
+    /// 评论列表接口同时服务帖子评论和评论回复，因此通过 `obj` 参数区分目标对象。
     func fetchComments(
         objectID: String,
         order: GalleryCommentOrder,
@@ -325,6 +352,8 @@ struct GalleryService {
     }
 
     /// 对帖子或评论执行点赞操作。
+    ///
+    /// 后端统一把帖子点赞和评论点赞收口到同一个接口，因此这里只需要传对象 ID。
     func like(objectID: String) async throws -> GalleryLikeResult {
         try await sendJSONRequest(
             path: "reaction/like",
@@ -334,6 +363,9 @@ struct GalleryService {
     }
 
     /// 创建一条评论或回复。
+    ///
+    /// 如果 `replyObjectID` 和 `replyUID` 为空，则表示直接评论帖子或主评论；
+    /// 否则表示对某条具体评论的回复。
     func createComment(
         objectID: String,
         text: String,
@@ -358,6 +390,9 @@ struct GalleryService {
     }
 
     /// 获取消息中心各分类的未读数。
+    ///
+    /// 服务端目前只提供分类未读数，不提供逐条 read 状态，因此消息页的“伪新消息”
+    /// 需要先依赖这里的结果。
     func fetchMessageUnreadCounts() async throws -> GalleryMessageUnreadCounts {
         try await sendJSONRequest(path: "messages/unread_nums")
     }
@@ -374,6 +409,8 @@ struct GalleryService {
     }
 
     /// 统一拼装帖子流接口参数。
+    ///
+    /// 这是普通帖子 feed 的公共入口，会在拿到服务端结果后再按设置补一层本地机器人过滤。
     private func fetchPosters(
         mode: String?,
         order: String?,
@@ -394,6 +431,9 @@ struct GalleryService {
     }
 
     /// 发起原始帖子流请求，不做客户端过滤，供更高层组合推荐/机器人等特殊分页语义。
+    ///
+    /// 把“原始请求”和“本地过滤”拆开，是因为推荐流和机器人流都需要基于服务端原始分页
+    /// 自己决定如何跳页、如何兜底，而不能简单复用一层已经过滤后的数组。
     private func fetchRawPosters(
         mode: String?,
         order: String?,
@@ -443,12 +483,7 @@ struct GalleryService {
         request.httpMethod = "GET"
         request.setValue(fakeCookie, forHTTPHeaderField: "fake-cookie")
 
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw error
-        }
+        let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw GalleryServiceError.invalidResponse
         }
@@ -476,6 +511,15 @@ struct GalleryService {
         }
     }
 
+    /// 统一的 JSON 请求辅助函数。
+    ///
+    /// 话廊大多数接口都共享相同的行为：
+    /// - 带 fake-cookie
+    /// - HTTP 200-299 视为成功
+    /// - 401 统一映射为登录态失效
+    /// - 默认按 `convertFromSnakeCase` 解码
+    ///
+    /// 这里把这些通用规则集中起来，避免每个接口各写一遍样板代码。
     private func sendJSONRequest<Response: Decodable>(
         path: String,
         queryItems: [URLQueryItem] = [],

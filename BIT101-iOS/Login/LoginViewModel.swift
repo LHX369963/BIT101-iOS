@@ -9,12 +9,18 @@ import Combine
 import Foundation
 
 /// 登录页当前展示的顶层状态。
+///
+/// 登录模块不直接暴露大量布尔值，而是收敛成“已登录 / 未登录”两种外层场景。
+/// 这样根视图切换更直观，也避免多个布尔值组合出无意义状态。
 enum LoginScreenState: Equatable {
     case signedOut
     case signedIn(studentID: String)
 }
 
 /// 登录页统一使用的警告模型。
+///
+/// 登录模块所有错误提示都经由这个模型统一上抛给视图层，避免 ViewModel 直接依赖
+/// 某种具体 Alert 组件。
 struct LoginAlert: Identifiable {
     let id = UUID()
     let title: String
@@ -28,16 +34,24 @@ struct LoginAlert: Identifiable {
 /// 2. 驱动登录按钮的提交状态
 /// 3. 管理退出登录后的界面回退
 final class LoginViewModel: ObservableObject {
+    /// 学号输入框内容。
     @Published var studentID: String
+    /// 密码输入框内容。
     @Published var password = ""
-    @Published var isPasswordVisible = false
+    /// 登录模块当前处于登录页还是主壳层。
     @Published private(set) var screenState: LoginScreenState
+    /// 是否正在执行登录请求。
     @Published private(set) var isSubmitting = false
+    /// 当前待展示的提示弹窗。
     @Published var alert: LoginAlert?
 
     private let service: LoginService
+    /// 避免启动校验在视图重建时重复触发。
     private var hasBootstrapped = false
 
+    /// 用持久化的本地状态初始化登录表单与首屏。
+    ///
+    /// 如果本地已有 fake-cookie，会先乐观进入主界面，再后台校验会话是否仍然有效。
     init(service: LoginService = LoginService()) {
         self.service = service
         let savedStudentID = service.savedStudentID
@@ -47,6 +61,8 @@ final class LoginViewModel: ObservableObject {
     }
 
     /// 当前输入是否满足提交条件。
+    ///
+    /// 这里只校验最基础的非空条件；真正的网络校验和密码正确性由提交时处理。
     var canSubmit: Bool {
         !studentID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
             !password.isEmpty &&
@@ -88,6 +104,10 @@ final class LoginViewModel: ObservableObject {
         }
     }
 
+    /// 执行一次显式登录。
+    ///
+    /// 登录成功后会清空内存中的密码文本，但底层 `LoginStorage` 仍会保存凭据，
+    /// 以便后续静默重登学校 SSO。
     func login() async {
         let trimmedStudentID = studentID.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -119,6 +139,8 @@ final class LoginViewModel: ObservableObject {
     }
 
     /// 退出当前账号，并回退到登录页。
+    ///
+    /// 退出动作只清会话，不清账号密码，因此登录页会保留最近一次输入的学号。
     func logout() {
         service.logout()
         studentID = service.savedStudentID

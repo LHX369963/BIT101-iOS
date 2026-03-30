@@ -16,6 +16,9 @@ struct GalleryCommentState {
 }
 
 /// 评论输入的目标。
+///
+/// 发评论页既支持“直接评论帖子”，也支持“回复某条评论”。
+/// 这两种场景最终需要拼出来的接口参数不同，所以这里用一个枚举把它们收敛到一起。
 enum GalleryCommentComposerTarget: Identifiable, Equatable {
     case poster(posterID: Int)
     case comment(mainComment: GalleryComment, targetComment: GalleryComment)
@@ -88,19 +91,33 @@ enum GalleryCommentComposerTarget: Identifiable, Equatable {
 ///
 /// 负责重新拉取帖子详情、评论分页、排序切换、点赞和评论发送。
 final class GalleryPosterDetailViewModel: ObservableObject {
+    /// 当前正在展示的帖子详情。
     @Published private(set) var poster: GalleryPosterDetail
+    /// 帖子正文区域的加载状态。
     @Published private(set) var posterStatus: GalleryFeedStatus = .idle
+    /// 评论区的分页状态。
     @Published private(set) var commentState = GalleryCommentState()
+    /// 当前评论排序方式。
     @Published var commentOrder: GalleryCommentOrder = .newest
+    /// 是否正在点赞帖子，避免重复点击。
     @Published private(set) var isLikingPoster = false
+    /// 当前正在点赞的评论 ID 集合。
     @Published private(set) var likingCommentIDs: Set<Int> = []
+    /// 是否正在提交评论。
     @Published private(set) var isSubmittingComment = false
+    /// 是否正在删除帖子。
     @Published private(set) var isDeletingPoster = false
+    /// 页面级统一提示。
     @Published var alert: LoginAlert?
 
+    /// 固定的帖子 ID。后续刷新都基于它重新请求详情。
     private let posterID: Int
     private let service: GalleryService
 
+    /// 用列表卡片初始化详情状态机。
+    ///
+    /// 详情页通常是从某张帖子卡片点进来的，因此这里先把列表已有数据转换成一份
+    /// 临时详情对象，再异步替换成真实详情，可以避免页面首帧完全空白。
     init(initialPoster: GalleryPoster, service: GalleryService) {
         posterID = initialPoster.id
         poster = GalleryPosterDetail(poster: initialPoster)
@@ -112,6 +129,10 @@ final class GalleryPosterDetailViewModel: ObservableObject {
     }
 
     /// 首次进入详情页时同时拉取帖子详情和第一页评论。
+    ///
+    /// 这里要求“帖子状态和评论状态都还在 idle”才会触发，是为了防止：
+    /// - 视图重复出现时多次并发请求
+    /// - 调用方已经手动触发刷新后又被 bootstrap 重复覆盖
     func bootstrapIfNeeded() async {
         guard posterStatus == .idle, commentState.status == .idle else { return }
         await refreshAll()
@@ -154,6 +175,9 @@ final class GalleryPosterDetailViewModel: ObservableObject {
     }
 
     /// 当滚动到尾部附近时触发评论分页。
+    ///
+    /// 评论分页依然沿用“最后几条触发”的策略，因为评论列表长度通常远小于主 feed，
+    /// 且用户更能接受在尾部附近触发一次分页请求。
     func loadMoreCommentsIfNeeded(currentComment: GalleryComment?) async {
         guard let currentComment else { return }
         guard
@@ -188,6 +212,9 @@ final class GalleryPosterDetailViewModel: ObservableObject {
     }
 
     /// 切换评论排序后立刻重新请求第一页。
+    ///
+    /// 评论排序会改变整棵评论树的结构，因此不做本地排序，直接重新拉第一页，
+    /// 保证与服务端结果完全一致。
     func setCommentOrder(_ order: GalleryCommentOrder) async {
         guard commentOrder != order else { return }
         commentOrder = order
@@ -195,6 +222,8 @@ final class GalleryPosterDetailViewModel: ObservableObject {
     }
 
     /// 点赞或取消点赞当前帖子。
+    ///
+    /// 帖子详情只维护一份当前详情模型，因此点赞成功后直接替换 `poster` 即可。
     func likePoster() async {
         guard !isLikingPoster else { return }
         isLikingPoster = true
@@ -210,6 +239,8 @@ final class GalleryPosterDetailViewModel: ObservableObject {
     }
 
     /// 点赞或取消点赞某条评论。
+    ///
+    /// 评论可能嵌套在多级子评论里，所以更新时需要递归地重建评论树。
     func likeComment(_ comment: GalleryComment) async {
         guard !likingCommentIDs.contains(comment.id) else { return }
         likingCommentIDs.insert(comment.id)
@@ -260,6 +291,8 @@ final class GalleryPosterDetailViewModel: ObservableObject {
     }
 
     /// 删除当前帖子。
+    ///
+    /// 只有本人帖子允许删帖；视图层会根据返回值决定是否关闭详情页并刷新上层列表。
     func deletePoster() async -> Bool {
         guard poster.own else { return false }
         guard !isDeletingPoster else { return false }
@@ -278,6 +311,9 @@ final class GalleryPosterDetailViewModel: ObservableObject {
     }
 
     /// 统一处理帖子详情请求结果。
+    ///
+    /// 取消请求不视为失败，而是静默把状态维持在“已加载”，避免用户快速切页时
+    /// 因网络取消看到误导性的失败弹窗。
     private func handlePosterResult(_ result: Result<GalleryPosterDetail, Error>) {
         switch result {
         case let .success(poster):
@@ -293,6 +329,7 @@ final class GalleryPosterDetailViewModel: ObservableObject {
         }
     }
 
+    /// 统一处理“刷新第一页评论”的结果。
     private func handleCommentRefreshResult(_ result: Result<[GalleryComment], Error>) {
         switch result {
         case let .success(comments):
@@ -314,6 +351,7 @@ final class GalleryPosterDetailViewModel: ObservableObject {
         }
     }
 
+    /// 把抛错的异步操作包成 `Result`，方便并发拉详情和评论时统一收口。
     private func loadResult<T>(_ operation: @escaping () async throws -> T) async -> Result<T, Error> {
         do {
             return .success(try await operation())
@@ -334,6 +372,10 @@ final class GalleryPosterDetailViewModel: ObservableObject {
 }
 
 private extension Array where Element == GalleryComment {
+    /// 递归更新评论树中的点赞状态。
+    ///
+    /// 顶层评论和子评论共用同一个模型结构，因此这里用数组扩展做树状更新，
+    /// 让视图模型不必知道评论嵌套的具体深度。
     func updatingLike(for commentID: Int, like: Bool, likeNum: Int) -> [GalleryComment] {
         map { comment in
             let updatedSub = comment.sub.updatingLike(for: commentID, like: like, likeNum: likeNum)

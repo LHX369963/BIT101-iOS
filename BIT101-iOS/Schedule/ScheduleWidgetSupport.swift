@@ -16,6 +16,8 @@ enum ScheduleWidgetSharedContainer {
 }
 
 /// 写入小组件共享容器的精简节次模型。
+///
+/// 只保留 widget 时间线真正需要的时段字段，避免把整个 `TimeSlot` 连同其它上下文都带进共享快照。
 struct ScheduleWidgetTimeSlotSnapshot: Codable {
     let id: Int
     let start: String
@@ -23,6 +25,8 @@ struct ScheduleWidgetTimeSlotSnapshot: Codable {
 }
 
 /// 写入小组件共享容器的精简课程模型。
+///
+/// 小组件目前只展示“下一节/后续几节课”，所以只导出排课、标题和地点相关字段。
 struct ScheduleWidgetCourseSnapshot: Codable {
     let id: String
     let name: String
@@ -35,6 +39,8 @@ struct ScheduleWidgetCourseSnapshot: Codable {
 }
 
 /// 提供给小组件时间线使用的共享课表快照。
+///
+/// 这是主 App 与 widget extension 之间的数据契约。只要它稳定，两侧就可以独立演进视图实现。
 struct ScheduleWidgetSnapshot: Codable {
     let firstDayString: String
     let timeTable: [ScheduleWidgetTimeSlotSnapshot]
@@ -54,6 +60,7 @@ enum ScheduleWidgetSnapshotStore {
         return encoder
     }()
 
+    /// 把共享快照写入 App Group 容器。
     static func save(_ snapshot: ScheduleWidgetSnapshot) {
         guard let fileURL else { return }
 
@@ -69,6 +76,7 @@ enum ScheduleWidgetSnapshotStore {
         }
     }
 
+    /// 清空共享快照文件。
     static func clear() {
         guard let fileURL else { return }
 
@@ -81,6 +89,7 @@ enum ScheduleWidgetSnapshotStore {
         }
     }
 
+    /// App Group 中用于保存 widget 快照的文件路径。
     private static var fileURL: URL? {
         guard
             let containerURL = FileManager.default.containerURL(

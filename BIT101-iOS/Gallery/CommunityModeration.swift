@@ -44,13 +44,24 @@ enum CommunitySupport {
 
 /// 社区本地治理工具。
 enum CommunityModeration {
+    /// 机器人帖子常见标签的归一化集合。
+    ///
+    /// 这些关键词会被用于两个场景：
+    /// 1. 识别“机器人”分栏里的帖子。
+    /// 2. 决定哪些服务端帖子应绕过本地脏词拦截。
+    ///
+    /// 在初始化阶段就统一做一次 `normalize`，可以避免后续每次比对时重复归一化。
     private static let botTagKeywords = [
         "bot",
         "机器人",
         "通知",
         "新闻"
-    ]
+    ].map(normalize)
 
+    /// 本地内置的举报类型常量。
+    ///
+    /// Android/Web 端曾依赖服务端下发举报类型，但当前接口已经不稳定，因此 iOS 侧把
+    /// 一组与后端 `type_id` 保持一致的常量固化在本地，保证举报菜单始终可用。
     static let reportTypes: [CommunityReportType] = [
         CommunityReportType(id: 1, title: "政治敏感"),
         CommunityReportType(id: 2, title: "色情低俗"),
@@ -61,6 +72,10 @@ enum CommunityModeration {
         CommunityReportType(id: 7, title: "其他")
     ]
 
+    /// 兜底硬编码的高风险词。
+    ///
+    /// 这批词用于补齐三方词库可能缺失的中文口语脏词；命中策略是“归一化后直接包含”。
+    /// 它们数量不多，但优先级最高，目的是先兜住审核压力最大的内容。
     private static let fallbackLiteralKeywords = [
         "傻逼",
         "傻b",
@@ -86,14 +101,23 @@ enum CommunityModeration {
         "cnm"
     ]
 
+    /// 英文白名单。
+    ///
+    /// 三方英语词库会命中一些普通语境下常见的单词，这里手工白名单掉已知误伤项，
+    /// 避免用户正常发帖时因为英文短词被错误拦截。
     private nonisolated static let englishAllowlist: Set<String> = [
         "abuse",
         "aroused"
     ]
 
+    /// 打包进 app 的中文脏词词库。
     private static let vendoredChineseWords = loadVendoredWords(fileName: "zh")
+    /// 打包进 app 的英文脏词词库。
     private static let vendoredEnglishWords = loadVendoredWords(fileName: "en")
 
+    /// 用于补齐“包含空格、大小写、变体较多”的敏感词规则。
+    ///
+    /// 这些表达式更适合处理英文和组合词，避免单纯的 `contains` 无法覆盖的写法。
     private static let blockedRegexPatterns = [
         #"(?i)\bfuck\b"#,
         #"(?i)\bbitch\b"#,
@@ -136,10 +160,13 @@ enum CommunityModeration {
     }
 
     /// 判断一条帖子是否带有机器人标签。
+    ///
+    /// 这里不直接依赖某个单一标签值，而是容忍 `bot/机器人/通知/新闻` 等多种来源。
+    /// 这样即使服务端不同历史帖子使用了不同标签命名，也能统一识别到机器人帖子。
     static func isBotPoster(tags: [String]) -> Bool {
         let normalizedTags = tags.map(normalize)
         return normalizedTags.contains { tag in
-            botTagKeywords.contains(where: { keyword in tag.contains(normalize(keyword)) })
+            botTagKeywords.contains(where: { keyword in tag.contains(keyword) })
         }
     }
 
@@ -164,6 +191,13 @@ enum CommunityModeration {
     }
 
     /// 判断单个帖子在当前本地治理设置下是否可见。
+    ///
+    /// 过滤顺序是有意设计的：
+    /// 1. 先处理用户明确指定的隐藏对象。
+    /// 2. 再处理匿名屏蔽等强偏好。
+    /// 3. 最后才做脏词检测。
+    ///
+    /// 这样可以保证“用户手动屏蔽”的优先级始终最高，也能让机器人帖子绕过脏词规则。
     static func isPosterVisible(_ poster: GalleryPoster, snapshot: AppSettingsSnapshot) -> Bool {
         let hideAnonymous = snapshot.galleryHiddenUserIDs.first == -1
         let hiddenUsers = Set(snapshot.galleryHiddenUserIDs.filter { $0 != -1 })
@@ -189,6 +223,9 @@ enum CommunityModeration {
     }
 
     /// 判断单条评论在当前设置下是否可见。
+    ///
+    /// 评论过滤除了作者本人，还会在“严格屏蔽模式”下连带屏蔽回复目标，
+    /// 这样可以避免整串对被屏蔽用户的争吵仍然留在页面里。
     static func isCommentVisible(_ comment: GalleryComment, snapshot: AppSettingsSnapshot) -> Bool {
         let hideAnonymous = snapshot.galleryHiddenUserIDs.first == -1
         let hiddenUsers = Set(snapshot.galleryHiddenUserIDs.filter { $0 != -1 })
@@ -226,6 +263,9 @@ enum CommunityModeration {
     }
 
     /// 对英语脏词做单词级匹配，避免普通长单词误伤。
+    ///
+    /// 如果词条本身包含符号，则退回简单包含匹配；纯字母数字词则使用正则边界，
+    /// 确保例如 `class` 不会误伤 `ass` 这类短词。
     private nonisolated static func matchesEnglishWord(_ word: String, in text: String) -> Bool {
         guard !englishAllowlist.contains(word) else { return false }
 
@@ -238,6 +278,9 @@ enum CommunityModeration {
     }
 
     /// 从打包进 app 的词表文件中加载中英文脏词。
+    ///
+    /// 词库在不同构建阶段可能被放到不同目录，所以这里做了多级兜底查找。
+    /// 输出时会统一 trim、归一化，并滤掉过短词条，减少无意义命中。
     private nonisolated static func loadVendoredWords(fileName: String) -> [String] {
         guard let url = vendoredWordListURL(fileName: fileName),
               let contents = try? String(contentsOf: url, encoding: .utf8) else {
@@ -279,6 +322,9 @@ enum CommunityModeration {
 }
 
 /// 发往 BIT101 后端举报接口的请求体。
+///
+/// 这里的字段命名需要和服务端接口严格一致，所以用单独的 `CodingKeys`
+/// 明确声明 `type_id` 的映射，避免未来改模型时不小心破坏接口兼容。
 private struct BackendReportPayload: Encodable {
     let obj: String
     let typeID: Int
@@ -292,6 +338,9 @@ private struct BackendReportPayload: Encodable {
 }
 
 /// 发往可选外部审核端点的请求体。
+///
+/// 如果开发者在 `Info.plist` 中配置了额外的审核抄送端点，iOS 会把举报事件转成
+/// 这份更完整的结构，方便外部服务按帖子、用户、动作维度做审计。
 private struct ExternalModerationReportPayload: Encodable {
     let objectID: String
     let posterID: Int
@@ -307,10 +356,15 @@ private struct ExternalModerationReportPayload: Encodable {
 
 /// 举报上传服务。后端接口和可选自定义审核端点都走后台 best-effort，上报失败不会打断当前用户操作。
 struct CommunityReportService {
+    /// 官方 BIT101 举报接口根地址。
     private let backendBaseURL = URL(string: "https://bit101.flwfdd.xyz")!
     private let session: URLSession
     private let storage: LoginStorage
 
+    /// 构造带登录态 cookie 策略的举报会话。
+    ///
+    /// 举报接口依赖现有登录 cookie 和 fake-cookie，因此这里沿用主 app 的 cookie 容器，
+    /// 避免再为治理链路单独维护一套认证状态。
     init(storage: LoginStorage = .shared) {
         self.storage = storage
 
@@ -325,6 +379,8 @@ struct CommunityReportService {
     ///
     /// 上报是 best-effort 的：本地隐藏/屏蔽会立即生效，上报失败不会打断当前交互。
     func submitReport(for poster: GalleryPoster, type: CommunityReportType, note: String, action: CommunityReportAction) {
+        // 举报上传放到 detached 任务里，是为了彻底与当前页面交互解耦。
+        // 用户点完“举报并隐藏/屏蔽”后，界面应当立即收敛，而不是等待网络结果。
         Task.detached(priority: .utility) {
             try? await sendToBackend(poster: poster, type: type, note: note, action: action)
             try? await sendToExternalEndpoint(poster: poster, type: type, note: note, action: action)
@@ -341,6 +397,8 @@ struct CommunityReportService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(storage.fakeCookie, forHTTPHeaderField: "fake-cookie")
 
+        // 后端接口的自定义文本区只收一段 note，因此这里把动作、标题和用户补充说明
+        // 合并成一段结构化文字，便于管理端人工判断。
         let backendNote = [
             "iOS 客户端治理动作：\(action.title)",
             "帖子标题：\(poster.title)",

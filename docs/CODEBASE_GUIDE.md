@@ -1,184 +1,447 @@
-# BIT101-iOS 代码说明
+# BIT101-iOS 代码库导览
 
-这份文档对应当前 iOS 端的代码基线，目标不是重复代码，而是帮助后续维护时快速定位职责、数据流和扩展点。
+这份文档对应当前 iOS 端代码基线，目标不是重复源代码，而是帮助后续维护时快速回答下面几个问题：
 
-## 总体结构
+- 这个模块的职责是什么
+- 数据从哪里来，最后落到哪里
+- 哪些行为是平台约束，哪些只是当前实现选择
+- 如果要改某个功能，应该先看哪几个文件
 
-- `BIT101-iOS/BIT101-iOS/BIT101_iOSApp.swift`
-  应用入口，只负责挂载根视图并应用全局主题。
-- `BIT101-iOS/BIT101-iOS/ContentView.swift`
-  根容器，目前直接进入登录流程。
-- `BIT101-iOS/BIT101-iOS/Shell/AppShellView.swift`
-  登录后的 tab 壳层，决定底部栏展示顺序、默认页和颜色。
+## 1. 总体结构
 
-当前底部栏默认结构为：
+项目由两部分组成：
 
-1. `日程`
-2. `地图`
-3. `话题`
-4. `成绩`
-5. `我的`
+- `BIT101-iOS/BIT101-iOS`
+  主应用 target
+- `BIT101-iOS/BIT101ScheduleWidget`
+  小组件、锁屏组件、Live Activity / 灵动岛扩展 target
 
-## 登录模块
+主应用的顶层流程非常直接：
 
-- `BIT101-iOS/BIT101-iOS/Login/LoginViews.swift`
-  登录界面、启动检查页和登录表单。
-- `BIT101-iOS/BIT101-iOS/Login/LoginViewModel.swift`
-  登录页状态机，管理启动检查、登录提交和退出登录。
-- `BIT101-iOS/BIT101-iOS/Login/LoginService.swift`
-  学校 CAS、BIT101 登录、Keychain 凭据和 fake-cookie 持久化。
+1. `BIT101_iOSApp.swift`
+   挂载根视图，应用全局主题和屏幕方向策略。
+2. `ContentView.swift`
+   决定当前进入登录页还是登录后壳层。
+3. `Shell/AppShellView.swift`
+   登录后负责底部 tab、深链分发、跨模块弹层和全局路由。
 
-登录链路分三段：
+当前底部 tab 顺序是：
 
-1. 学校统一身份认证页面拉取 salt 和 execution。
-2. 学校登录成功后，补走一次 SSO 重定向链，保证学校 cookie 落地。
-3. 调用 BIT101 的 `webvpn_verify_init -> webvpn_verify -> register(loginMode=true)` 拿到 `fake-cookie`。
+1. 日程
+2. 地图
+3. 话廊
+4. 成绩
+5. 我的
 
-## 日程模块
+## 2. 横切约束
 
-- `BIT101-iOS/BIT101-iOS/Schedule/ScheduleModels.swift`
-  课表、考试、DDL、空教室、本地缓存和时间表模型。
-- `BIT101-iOS/BIT101-iOS/Schedule/ScheduleService.swift`
-  教务、乐学和空教室相关的网络请求与数据解析。
-- `BIT101-iOS/BIT101-iOS/Schedule/ScheduleViewModel.swift`
-  日程页状态机，本地缓存读写、同步入口和自定义数据 CRUD。
-- `BIT101-iOS/BIT101-iOS/Schedule/ScheduleRootView.swift`
-  课表 / DDL / 空教室三页的 SwiftUI 视图实现。
+在读各模块前，先记住这几个全局约束。
 
-日程模块的数据优先级：
+### 2.1 账号隔离
 
-1. 先从本地缓存恢复，保证页面秒开。
-2. 用户手动同步时再刷新远端数据。
-3. 自定义课程和自定义 DDL 与远端数据混合展示，但保存在同一份缓存里。
+下面这些数据已经按学号隔离：
 
-## 成绩模块
+- 课表 / DDL / 考试缓存
+- 话廊社区规则同意状态
+- 隐藏用户 / 隐藏帖子
+- 一部分界面与查询偏好
 
-- `BIT101-iOS/BIT101-iOS/Score/ScoreModels.swift`
-  原生成绩页使用的数据模型和统计逻辑。
-- `BIT101-iOS/BIT101-iOS/Score/ScoreService.swift`
-  使用已保存的学号和统一认证密码直接请求成绩接口。
-- `BIT101-iOS/BIT101-iOS/Score/ScoreRootView.swift`
-  原生成绩查询页、筛选页和统计展示。
+因此：
 
-成绩模块的原则：
+- 不能再把账号相关状态写回全局唯一 key
+- 退出登录或切号后，相关缓存和设置必须重新定位到当前账号
 
-1. `成绩` tab 现在完全走原生查询页，不再依赖网页自动填充。
-2. 成绩查询始终复用已保存的统一认证账号密码。
-3. 学期与种类筛选均支持 `全选 / 全不选 / 0 选项`。
+主要入口：
 
-## 地图模块
+- `Login/LoginService.swift`
+- `Settings/AppSettingsStore.swift`
+- `Schedule/ScheduleModels.swift`
 
-- `BIT101-iOS/BIT101-iOS/Map/CampusMapScreen.swift`
-  基于 `MapKit` 的地图页，加载自定义瓦片图层并支持校区快速跳转。
+### 2.2 主 App 与 Widget 的边界
 
-## 话题模块
+Widget、锁屏组件、Live Activity 不能直接依赖主 App 里复杂的缓存对象。
 
-- `BIT101-iOS/BIT101-iOS/Gallery/GalleryModels.swift`
-  帖子流、搜索、用户和图片模型。
-- `BIT101-iOS/BIT101-iOS/Gallery/CommunityModeration.swift`
-  本地敏感词检测、隐藏规则和举报上报逻辑。
-- `BIT101-iOS/BIT101-iOS/Gallery/GalleryComposerView.swift`
-  原生发帖页和标签交互。
-- `BIT101-iOS/BIT101-iOS/Gallery/GalleryService.swift`
-  话题流和搜索接口请求。
-- `BIT101-iOS/BIT101-iOS/Gallery/GalleryViewModel.swift`
-  四个 feed 和搜索页的状态机，负责刷新、分页和取消态处理。
-- `BIT101-iOS/BIT101-iOS/Gallery/GalleryRootView.swift`
-  话题首页、帖子卡片、详情页、图片查看器。
-- `BIT101-iOS/BIT101-iOS/Gallery/GalleryDebug.swift`
-  仅在环境变量开启时输出调试日志。
+当前设计是：
 
-话题页目前的关键设计：
+- 主 App 负责从课表缓存导出精简快照
+- Widget 只读共享容器里的快照
+- Live Activity 也尽量走最小必要状态
 
-- `关注 / 推荐 / 最新 / 最热` 通过轻扫手势切换，不再依赖 `TabView(.page)`。
-- 搜索页首次打开会自动加载一组预览结果，行为向 Android 搜索页对齐。
-- 图片点击与帖子点击分离，避免图片查看器和详情页抢手势。
-- 刷新和分页要显式处理取消态，不能把 `cancelled` 误报成失败。
-- 敏感词检测分两层：
-  1. 发帖前本地校验。
-  2. 服务端返回后、本地展示前再次过滤。
-- 带 `bot / 机器人 / 通知 / 新闻` tag 的帖子会跳过本地自动屏蔽，但仍允许手动举报或隐藏。
+主要入口：
 
-## 我的模块
+- `Schedule/ScheduleWidgetSupport.swift`
+- `Schedule/ScheduleLiveActivityManager.swift`
+- `BIT101ScheduleWidget/BIT101ScheduleWidget.swift`
 
-- `BIT101-iOS/BIT101-iOS/Mine/MineModels.swift`
-  我的页需要的个人信息和分页状态模型。
-- `BIT101-iOS/BIT101-iOS/Mine/MineService.swift`
-  个人主页、粉丝、关注、我的帖子接口。
-- `BIT101-iOS/BIT101-iOS/Mine/MineViewModel.swift`
-  个人资料、粉丝、关注、帖子三个分页列表的状态机。
-- `BIT101-iOS/BIT101-iOS/Mine/MineRootView.swift`
-  我的页主界面和内部子页面。
+### 2.3 图片与头像缓存
 
-我的页当前的约定：
+项目已经不再只依赖系统默认缓存，而是有一层本地显式头像缓存。维护这部分时要注意：
 
-1. “我的帖子”直接复用话题卡片和详情页实现，避免两套帖子 UI 分叉。
-2. 设置入口不再只藏在右上角，而是直接平铺在“我的”页底部。
+- 内存缓存和磁盘缓存都在起作用
+- 更换头像 URL 规则时，要注意缓存 key 是否仍然稳定
+- 图片列表和头像缓存是两类问题，不要混在一起处理
 
-## 设置模块
+主要文件：
 
-- `BIT101-iOS/BIT101-iOS/Settings/AppSettingsStore.swift`
-  全局设置存储，落地到 `UserDefaults`；账号相关设置会按学号隔离。
-- `BIT101-iOS/BIT101-iOS/Settings/SettingsServices.swift`
-  设置中心会复用的网络请求。
-- `BIT101-iOS/BIT101-iOS/Settings/SettingsRootView.swift`
-  设置首页和各个子设置页。
+- `CachedRemoteImage.swift`
+- `Gallery/GalleryRootView.swift`
+- `Mine/MineRootView.swift`
 
-设置模块的约束：
+## 3. 登录模块
 
-- “我的”页和日程页进入的设置页，要尽量复用同一套菜单。
-- 会影响运行时显示的设置，修改后应尽量立即反映到界面。
+### 3.1 组成文件
 
-## 小组件与灵动岛
+- `Login/LoginViews.swift`
+  登录页与启动检查 UI
+- `Login/LoginViewModel.swift`
+  登录状态机
+- `Login/LoginService.swift`
+  CAS、SSO、BIT101 登录与凭据恢复
 
-- `BIT101-iOS/BIT101-iOS/Schedule/ScheduleWidgetSupport.swift`
-  主 App 向 App Group 共享容器导出精简课表快照。
-- `BIT101-iOS/BIT101-iOS/Schedule/ScheduleLiveActivityManager.swift`
-  根据当前账号的课表缓存与自定义日程，决定是否启动或更新课程提醒 Live Activity。
-- `BIT101-iOS/BIT101ScheduleWidget/BIT101ScheduleWidget.swift`
-  桌面课表 widget 与 Live Activity / Dynamic Island 的全部 UI。
+### 3.2 数据流
 
-这条链路当前的设计约束：
+登录链路大致分三段：
 
-1. Widget 只读取共享容器里的精简课表快照，不直接访问主 App 的复杂缓存模型。
-2. Live Activity 只展示“当前项 / 下一项”，并受“提前显示阈值”控制。
-3. 灵动岛紧凑态优先展示高密度信息，例如 `上课/日程 + xx分`。
-4. 小组件 deep link 统一走 `bit101://schedule/courses`，打开后落到“日程 -> 课表”。
+1. 请求学校 CAS 页面，提取登录所需参数
+2. 提交学校账号密码并完成学校侧 cookie 落地
+3. 走 BIT101 的登录 / 注册桥接，拿到项目自己的 `fake-cookie`
 
-## 账号隔离
+最终状态分别落在：
 
-当前以下数据已按账号隔离，不再在不同学号之间串用：
+- Keychain
+  学校账号密码与必要凭据
+- 本地 cookie / session
+  学校 SSO 与 BIT101 会话
+- `AppSettingsStore`
+  与账号关联的偏好设置
 
-1. 课表 / DDL 本地缓存
-2. 话题社区规则同意状态
-3. 隐藏用户 / 隐藏帖子
-4. 账号相关设置快照
+### 3.3 维护重点
 
-## 地图模块补充
+- 学校 SSO 有历史上的 `http -> https` 跳转问题，因此 `LoginService` 内有 URL 升级逻辑
+- 登录链路只要失败，首先分清是学校登录失败，还是 BIT101 注册 / 登录桥接失败
+- 切号行为不只是清 cookie，还会触发账号变更通知，影响设置页、日程缓存和话廊规则状态
 
-地图页当前不再暴露手动缩放倍率设置，默认按固定倍率展示，只保留：
+## 4. 日程模块
 
-1. 校区跳转
-2. 回到我的位置
-3. 系统原生的地图交互缩放
+### 4.1 组成文件
 
-## 空教室模块补充
+- `Schedule/ScheduleModels.swift`
+  课表、考试、DDL、空教室、本地缓存和时间表模型
+- `Schedule/ScheduleService.swift`
+  教务、乐学、空教室相关的网络请求与数据解析
+- `Schedule/ScheduleViewModel.swift`
+  日程主状态机
+- `Schedule/ScheduleRootView.swift`
+  课表 / DDL / 空教室 UI
+- `Schedule/ScheduleWidgetSupport.swift`
+  共享快照导出
+- `Schedule/ScheduleLiveActivityManager.swift`
+  课程提醒 Live Activity
 
-空教室筛选当前采用两种语义：
+### 4.2 数据优先级
 
-1. `一个节次都不选`
-   等价于“当前空闲”。
-2. `选中若干节次`
-   采用“命中任一节次空闲即显示”的规则。
+日程模块遵循“先快开，再同步”的策略：
 
-列表页当前只保留最核心信息：
+1. 先读本地缓存，保证页面秒开
+2. 用户再手动发起同步，刷新远端数据
+3. 自定义日程与远端课表混合展示，但由本地统一管理
 
-1. 教室名称
-2. 空闲时段
+### 4.3 课表 / DDL / 空教室的职责边界
 
-## 当前维护约定
+- 课表
+  负责课程、考试、自定义日程和课程周视图
+- DDL
+  负责乐学导入后的截止事项与本地完成状态
+- 空教室
+  负责校区、教学楼、节次的当前查询
 
-- 复杂网络链路优先在 service 层加注释，而不是把视图层写成解释器。
-- 状态机类文件优先说明“什么时候刷新”“什么时候恢复缓存”“为什么忽略取消错误”。
-- 视图文件优先说明“页面层级”和“手势/路由/弹层”的关系。
-- 新增模块时，先更新本文件，再补对应代码内的类型注释。
+这些能力虽然都放在 `ScheduleRootView.swift` 里，但状态来源并不一样：
+
+- 课表 / DDL / 考试：依赖课表缓存
+- 空教室：依赖查询偏好 + 当前查询结果
+- 自定义日程：纯本地 CRUD
+
+### 4.4 近期实现要点
+
+当前日程模块已经加入了几类偏好和自动匹配：
+
+- 成绩筛选偏好会记住上一次选择
+- 空教室会记住校区偏好
+- 空教室会优先用“最近下一节课”去精确匹配教学楼
+- 空教室节次会按当前时段块自动匹配
+
+这些都意味着：
+
+- 不要轻易把“用户上一次选择”覆盖为默认值
+- 但空教室的“最近课程楼匹配”优先级应高于缓存
+
+## 5. 成绩模块
+
+### 5.1 组成文件
+
+- `Score/ScoreModels.swift`
+  成绩模型、筛选模型、统计模型
+- `Score/ScoreService.swift`
+  成绩请求与解析
+- `Score/ScoreRootView.swift`
+  成绩页、筛选页、统计页 UI
+
+### 5.2 当前设计
+
+成绩页现在完全是原生实现，不再依赖历史 WebView。
+
+关键点：
+
+- 查询直接复用已保存的学校账号密码
+- 学期筛选与成绩类型筛选支持全选 / 全不选 / 0 选
+- 上一次筛选结果会按账号保存
+
+维护这块时要注意：
+
+- 筛选状态是 UI 偏好，也是查询结果展示逻辑的一部分
+- 不能因为刷新查询结果而直接把用户筛选重置掉
+
+## 6. 地图模块
+
+### 6.1 组成文件
+
+- `Map/CampusMapScreen.swift`
+
+### 6.2 当前设计
+
+地图页使用 `MKMapView` 桥接，而不是纯 SwiftUI `Map`。
+
+原因是：
+
+- 需要更细的地图层控制
+- 需要做校园底图与自定义跳转
+- 需要兼容中国区 provider attribution 的处理
+
+### 6.3 维护重点
+
+地图页里有一部分是平台桥接，一部分是工程 hack：
+
+- `UIViewRepresentable + MKMapView`
+  这是合理桥接
+- attribution/legal label 的隐藏处理
+  这是更脆弱的内部视图层级 hack
+
+后续如果地图出现系统版本兼容问题，优先先看 attribution 那块，而不是怀疑全部地图逻辑都坏了。
+
+## 7. 话廊模块
+
+### 7.1 组成文件
+
+- `Gallery/GalleryModels.swift`
+  帖子、评论、搜索、消息、用户等模型
+- `Gallery/CommunityModeration.swift`
+  本地敏感词、屏蔽与举报相关规则
+- `Gallery/GalleryComposerView.swift`
+  发帖页
+- `Gallery/GalleryPosterDetailViewModel.swift`
+  帖子详情页状态机
+- `Gallery/GalleryService.swift`
+  feed、搜索、消息相关请求
+- `Gallery/GalleryViewModel.swift`
+  feed 与消息的状态机
+- `Gallery/GalleryRootView.swift`
+  首页、消息页、搜索页、帖子详情、图片查看器等 UI
+
+### 7.2 当前用户视角能力
+
+话廊当前已经包含：
+
+- `关注 / 推荐 / 最新 / 最热 / 机器人` feed
+- 搜索
+- 发帖
+- 评论
+- 举报
+- 本地屏蔽
+- 消息中心
+- 帖子详情跳他人主页
+
+### 7.3 关键约束
+
+#### 7.3.1 feed 切换
+
+为了避免此前 `TabView(.page)` 带来的底部黑边与布局问题，feed 切换采用了轻扫手势方案，而不是系统 pager。
+
+这意味着：
+
+- 横向切换体验是刻意保留的
+- 如果后续想回退到原生 pager，需要重新验证底部覆盖和 tab bar 采样问题
+
+#### 7.3.2 推荐流
+
+推荐流是目前最特殊的一条链路。
+
+原因：
+
+- 后端推荐链路本身更重
+- 可能需要随机补帖
+- 本地还会对帖子做屏蔽或机器人过滤
+
+因此维护推荐流时要同时留意：
+
+- 分页触发点
+- 本地可见列表与原始列表的关系
+- 预取与真实 append 的时机
+- 去重
+
+#### 7.3.3 消息中心
+
+消息中心的已读语义当前不是服务端逐条已读，而是：
+
+- 服务端提供分类未读数
+- 客户端基于当前分类未读数做“伪新消息”表现
+
+因此：
+
+- 这套已读状态不是跨设备强一致
+- 只能作为本地 UI 体验优化，而不是服务端真实消息状态
+
+### 7.4 屏蔽与敏感词
+
+当前敏感词与本地屏蔽有多层：
+
+1. 发帖前本地校验
+2. 展示前本地过滤
+3. 用户手动隐藏帖子 / 用户
+4. 机器人相关显示策略
+
+维护这部分时不要混淆：
+
+- “服务端不返回”
+- “客户端不展示”
+- “搜索仍允许展示”
+
+这三者是不同层面的策略。
+
+## 8. 我的模块
+
+### 8.1 组成文件
+
+- `Mine/MineModels.swift`
+- `Mine/MineService.swift`
+- `Mine/MineViewModel.swift`
+- `Mine/MineRootView.swift`
+
+### 8.2 当前设计
+
+“我的”页承担三件事：
+
+- 个人资料总览
+- 粉丝 / 关注 / 帖子入口
+- 设置与关于入口
+
+另外它也是“他人主页”的宿主模块。当前已经支持：
+
+- 从帖子详情进入他人主页
+- 从评论作者进入他人主页
+- 在他人主页继续浏览其帖子
+
+### 8.3 维护重点
+
+- 我的帖子与话廊帖子卡片尽量复用一套 UI，不要分叉
+- 资料页里的账号信息与“账号设置”里的账号信息不要重复堆叠
+
+## 9. 设置模块
+
+### 9.1 组成文件
+
+- `Settings/AppSettingsStore.swift`
+  全局设置快照、账号隔离设置、读写桥接
+- `Settings/SettingsServices.swift`
+  设置页复用的网络辅助
+- `Settings/SettingsRootView.swift`
+  设置页与关于页
+
+### 9.2 当前设计
+
+设置页不是“杂项回收站”，而是当前项目很多运行时行为的总入口，包括：
+
+- 外观模式
+- 屏幕旋转
+- 话廊相关设置
+- 课表与灵动岛提醒设置
+- 关于页与开源说明
+
+### 9.3 当前注意事项
+
+- 一部分设置是全局的
+- 一部分设置按账号隔离
+- 修改设置后，很多页面要求即时生效
+
+因此维护设置时要先判断：
+
+- 这是纯显示偏好，还是账号态数据
+- 改完后是否需要通知其它模块立即刷新
+
+## 10. 小组件、锁屏组件与灵动岛
+
+### 10.1 组成文件
+
+- `Schedule/ScheduleWidgetSupport.swift`
+- `Schedule/ScheduleLiveActivityManager.swift`
+- `BIT101ScheduleWidget/BIT101ScheduleWidget.swift`
+- `BIT101ScheduleWidget/BIT101ScheduleWidgetBundle.swift`
+
+### 10.2 当前能力
+
+当前已经支持：
+
+- 桌面课表 widget
+- 锁屏组件
+- Live Activity / 灵动岛课程提醒
+
+### 10.3 关键约束
+
+#### 10.3.1 共享容器
+
+主 App 与扩展通过同一个 App Group 共享数据：
+
+- `group.BIT101-dev.BIT101-iOS.shared`
+
+#### 10.3.2 深链
+
+小组件和 Live Activity 的深链统一走：
+
+- `bit101://...`
+
+目前课程类入口统一落到：
+
+- `bit101://schedule/courses`
+
+#### 10.3.3 灵动岛显示策略
+
+当前灵动岛提醒不是永久常驻，而受“提前显示阈值”控制。
+
+维护时要区分：
+
+- 小组件
+- 锁屏组件
+- Live Activity
+- Dynamic Island
+
+它们虽然共享同一批课表快照，但显示策略和平台约束并不一样。
+
+## 11. 文件级入口建议
+
+如果你是第一次接手项目，建议按下面顺序进入：
+
+1. `README.md`
+2. `docs/CODEBASE_GUIDE.md`
+3. `docs/FILE_INDEX.md`
+4. `Shell/AppShellView.swift`
+5. 你正在修改的模块的 `Service -> ViewModel -> RootView`
+
+## 12. 当前维护约定
+
+- 复杂网络链路优先在 service 层写清“为什么这样做”
+- 状态机文件优先说明刷新、缓存恢复、取消态处理
+- 视图文件优先说明页面层级、路由、弹层、手势关系
+- 大改用户可见行为后，要同步更新：
+  - 代码注释
+  - `README`
+  - `docs/CODEBASE_GUIDE.md`
+  - 相关维护文档

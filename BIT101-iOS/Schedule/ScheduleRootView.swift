@@ -31,6 +31,7 @@ private func normalizeDisplayedCourseTitle(_ value: String) -> String {
 /// 顶部是系统 segmented，正文按当前分区单独渲染。
 /// 这样能避免分页容器影响底部玻璃效果，同时保留轻扫切换体验。
 struct ScheduleRootView: View {
+    /// 壳层深链请求的目标分栏，例如从小组件点进来直接落到课表。
     @Binding var requestedSection: ScheduleSection?
     @StateObject private var viewModel = ScheduleViewModel()
 
@@ -90,6 +91,8 @@ struct ScheduleRootView: View {
     }
 
     /// 轻扫切换课表 / DDL / 空教室的手势。
+    ///
+    /// 与话廊页保持同一套交互语义：顶部 segmented 可点，正文支持横向轻扫切换。
     private var sectionSwitchGesture: some Gesture {
         DragGesture(minimumDistance: 24, coordinateSpace: .local)
             .onEnded { value in
@@ -135,6 +138,8 @@ struct ScheduleRootView: View {
 }
 
 /// 顶部胶囊切换条。
+///
+/// 保持成单独子视图后，根视图可以专注处理路由和副作用，而不是把 segmented 样式细节塞在一起。
 private struct ScheduleSectionTabs: View {
     @Binding var selectedSection: ScheduleSection
 
@@ -385,6 +390,11 @@ private struct CourseScheduleTabView: View {
 }
 
 /// 周课表大网格。
+///
+/// 这里是一个完全自绘的课表网格，而不是 `LazyVGrid` 套组件，原因是：
+/// - 需要精确控制节次高度
+/// - 需要叠加当前时间线
+/// - 需要把课程、考试、自定义日程放到同一坐标系里
 private struct CourseScheduleCalendarView: View {
     private static let monthDayFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -629,6 +639,8 @@ private struct CourseScheduleFAB: View {
 }
 
 /// 课表网格内部统一使用的条目类型。
+///
+/// 课程、考试、自定义日程最终都会投影成同一种“日历块”，但颜色和详情逻辑不同。
 private enum ScheduleCalendarKind {
     case course
     case exam
@@ -636,6 +648,8 @@ private enum ScheduleCalendarKind {
 }
 
 /// 供课表网格渲染的统一条目模型。
+///
+/// 这是课表 UI 层内部使用的适配模型，不直接持久化。
 private struct ScheduleCalendarEntry: Identifiable {
     let id: String
     let sourceID: String
@@ -649,6 +663,8 @@ private struct ScheduleCalendarEntry: Identifiable {
 }
 
 /// 课表条目详情。
+///
+/// 课表块点击后的二级详情页，兼容课程、考试和自定义日程三种来源。
 private struct ScheduleEntryDetailSheet: View {
     let entry: ScheduleCalendarEntry
     let timeTable: [TimeSlot]
@@ -708,6 +724,8 @@ private struct ScheduleEntryDetailSheet: View {
 }
 
 /// 新增 / 编辑自定义日程弹层。
+///
+/// 课表页和自定义日程列表页都共用这一套编辑器。
 private struct AddEditCustomScheduleSheet: View {
     @Binding var draft: CustomScheduleDraft
     let isEditing: Bool
@@ -751,6 +769,8 @@ private struct AddEditCustomScheduleSheet: View {
 }
 
 /// 时间表编辑器。
+///
+/// 这是一个偏工程化的入口，允许直接批量编辑整份节次表文本。
 struct TimeTableEditorSheet: View {
     @Binding var text: String
     let onSubmit: () -> Void
@@ -786,6 +806,8 @@ struct TimeTableEditorSheet: View {
 }
 
 /// 自定义日程列表页。
+///
+/// 从课表页右下角加号新增的是单条自定义日程；这张列表页则负责管理全部已有自定义日程。
 struct CustomScheduleListSheet: View {
     @ObservedObject var viewModel: ScheduleViewModel
     @Environment(\.dismiss) private var dismiss
@@ -900,6 +922,7 @@ struct CustomScheduleListSheet: View {
     }
 }
 
+/// 处理同一天中互相重叠的日历块，避免后插入的块把前一个块完全遮住。
 private func normalize(entries: [ScheduleCalendarEntry]) -> [ScheduleCalendarEntry] {
     let sorted = entries.sorted { lhs, rhs in
         if lhs.dayOfWeek == rhs.dayOfWeek {
@@ -939,6 +962,9 @@ private func normalize(entries: [ScheduleCalendarEntry]) -> [ScheduleCalendarEnt
     return result
 }
 
+/// 把具体时间映射到课表网格中的“浮点节次位置”。
+///
+/// 例如 10:15 可能落在第 3.4 节的位置，用于考试和自定义日程块的连续时间定位。
 private func convertTimeToSection(timeText: String, timeTable: [TimeSlot]) -> CGFloat {
     let minutes = TimeSlot.parseMinutes(timeText)
     guard !timeTable.isEmpty else { return 0 }
@@ -951,6 +977,7 @@ private func convertTimeToSection(timeText: String, timeTable: [TimeSlot]) -> CG
     return CGFloat(sectionIndex) + ratio
 }
 
+/// 根据首周日期计算课表页当前周次。
 private func resolvedCurrentWeek(firstDay: Date) -> Int {
     let start = Calendar.current.startOfDay(for: firstDay)
     let today = Calendar.current.startOfDay(for: Date())
@@ -959,6 +986,8 @@ private func resolvedCurrentWeek(firstDay: Date) -> Int {
 }
 
 /// DDL 分页。
+///
+/// DDL 页当前走最原生的 `List(.insetGrouped)`，与成绩和空教室保持一致。
 private struct DDLScheduleTabView: View {
     @ObservedObject var viewModel: ScheduleViewModel
     @State private var selectedEvent: DDLEventRecord?
@@ -1014,7 +1043,10 @@ private struct DDLScheduleTabView: View {
                     }
                 }
                 .listStyle(.insetGrouped)
-                .ignoresSafeArea(edges: .bottom)
+                .safeAreaInset(edge: .bottom) {
+                    Color.clear
+                        .frame(height: 0)
+                }
             }
         }
         .sheet(item: $selectedEvent) { event in
@@ -1068,6 +1100,8 @@ private struct DDLScheduleTabView: View {
 }
 
 /// DDL 列表卡片。
+///
+/// DDL 虽然放在 `List` 里，但单条仍保留卡片式内容区，以便容纳剩余时间、详情摘要和完成按钮。
 private struct DDLEventCard: View {
     let event: DDLEventRecord
     let remainText: String
@@ -1118,6 +1152,8 @@ private struct DDLEventCard: View {
 }
 
 /// DDL 详情页。
+///
+/// 乐学同步项只允许查看，不允许编辑和删除；手动项才会出现编辑/删除按钮。
 private struct DDLEventDetailSheet: View {
     let event: DDLEventRecord
     let remainText: String
@@ -1168,6 +1204,8 @@ private struct DDLEventDetailSheet: View {
 }
 
 /// 自定义 DDL 编辑页。
+///
+/// 这里同时服务新增和编辑两种场景，仅靠 `isEditing` 调整标题文案。
 private struct DDLEditSheet: View {
     @Binding var draft: DDLDraft
     let isEditing: Bool
@@ -1280,6 +1318,7 @@ private struct FreeClassroomTabView: View {
                 }
             } else {
                 Section {
+                    // 这里展示的是已经过 ViewModel 排序和筛选后的可用教室结果。
                     ForEach(viewModel.classroomAvailabilities) { classroom in
                         HStack(spacing: 12) {
                             Text(classroom.name)
@@ -1296,7 +1335,10 @@ private struct FreeClassroomTabView: View {
             }
         }
         .listStyle(.insetGrouped)
-        .ignoresSafeArea(edges: .bottom)
+        .safeAreaInset(edge: .bottom) {
+            Color.clear
+                .frame(height: 0)
+        }
         .refreshable {
             await viewModel.refreshClassroomPage()
         }
@@ -1343,6 +1385,7 @@ private struct ClassroomSectionFilterPage: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
+    /// 切换单个节次是否被选中。
     private func toggle(_ sectionID: Int) {
         var next = selectedSectionIDs
         if let index = next.firstIndex(of: sectionID) {
@@ -1353,6 +1396,7 @@ private struct ClassroomSectionFilterPage: View {
         selectedSectionIDs = next.sorted()
     }
 
+    /// 在“全选”和“全不选”之间切换。
     private func toggleAll() {
         if selectedSectionIDs.count == timeTable.count {
             selectedSectionIDs = []
@@ -1361,6 +1405,7 @@ private struct ClassroomSectionFilterPage: View {
         }
     }
 
+    /// 顶部总开关文案。
     private var toggleAllTitle: String {
         selectedSectionIDs.count == timeTable.count ? "全不选" : "全选"
     }

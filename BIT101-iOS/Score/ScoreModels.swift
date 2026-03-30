@@ -1,6 +1,8 @@
 import Foundation
 
 /// 成绩页加载状态。
+///
+/// 与其它模块一致，这里统一成四态，便于成绩页根视图只根据一个状态枚举驱动空态、错误态和加载态。
 enum ScoreLoadState: Equatable {
     case idle
     case loading
@@ -24,6 +26,9 @@ struct ScoreRow: Identifiable {
     let values: [ScoreField]
 
     /// 使用表头和值数组构造单行成绩记录。
+    ///
+    /// 之所以不直接依赖固定字段顺序，是因为成绩代理接口本质上返回的是一个“二维表”，
+    /// 表头变化时这里仍能靠键名访问保持一定韧性。
     init(index: Int, headers: [String], values: [String]) {
         let pairs = zip(headers, values).map { ScoreField(key: $0, value: $1) }
         self.values = pairs

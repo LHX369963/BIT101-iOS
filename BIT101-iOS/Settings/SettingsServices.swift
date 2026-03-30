@@ -7,16 +7,6 @@
 
 import Foundation
 
-/// 版本检查接口返回的数据结构。
-struct AppVersionInfo: Decodable {
-    let minVersionCode: Int
-    let minVersionName: String
-    let versionCode: Int
-    let versionName: String
-    let url: String
-    let msg: String
-}
-
 /// 设置中心网络层的统一错误。
 enum SettingsServiceError: LocalizedError {
     case notLoggedIn
@@ -41,10 +31,12 @@ enum SettingsServiceError: LocalizedError {
 /// 账号信息、头像上传、登录状态检查和版本检查都集中在这里，避免页面层直接拼请求。
 struct SettingsNetworkService {
     private let baseURL = URL(string: "https://bit101.flwfdd.xyz")!
-    private let appBaseURL = URL(string: "https://android.bit101.cn")!
     private let session: URLSession
     private let storage: LoginStorage
 
+    /// 初始化设置中心网络层。
+    ///
+    /// 头像上传和资料修改都依赖 fake-cookie，因此这里与主 app 共用登录态存储。
     init(storage: LoginStorage = .shared) {
         self.storage = storage
         let configuration = URLSessionConfiguration.default
@@ -55,6 +47,8 @@ struct SettingsNetworkService {
     }
 
     /// 拉取当前登录用户自己的资料。
+    ///
+    /// 账号设置页、隐藏用户列表恢复展示等场景都会复用这条接口。
     func fetchMyInfo() async throws -> MineUserInfo {
         try await sendAuthedJSONRequest(path: "user/info/0")
     }
@@ -65,6 +59,8 @@ struct SettingsNetworkService {
     }
 
     /// 更新昵称、签名和头像。
+    ///
+    /// 接口要求整份资料一起提交，因此调用方需要自行传入“未改动但仍需保留”的旧值。
     func updateUser(nickname: String?, motto: String?, avatarMid: String?) async throws {
         let fakeCookie = storage.fakeCookie
         guard !fakeCookie.isEmpty else { throw SettingsServiceError.notLoggedIn }
@@ -90,6 +86,8 @@ struct SettingsNetworkService {
     }
 
     /// 上传头像图片，返回服务端生成的图片资源对象。
+    ///
+    /// 上传成功后还需要再调用一次 `updateUser`，把返回的 `mid` 绑定到用户资料里。
     func uploadAvatar(data: Data, filename: String = "avatar.jpg") async throws -> GalleryImage {
         let fakeCookie = storage.fakeCookie
         guard !fakeCookie.isEmpty else { throw SettingsServiceError.notLoggedIn }
@@ -115,20 +113,10 @@ struct SettingsNetworkService {
     }
 
     /// 检查当前登录状态是否仍然有效。
+    ///
+    /// 这里直接复用登录模块的后台校验逻辑，不额外复制一套登录判断链路。
     func checkLogin() async throws -> Bool {
         try await LoginService().checkLogin() != nil
-    }
-
-    /// 获取版本更新信息。
-    func fetchVersionInfo() async throws -> AppVersionInfo {
-        let url = appBaseURL.appending(path: "version/")
-        let (data, response) = try await session.data(from: url)
-        guard let httpResponse = response as? HTTPURLResponse, (200 ..< 300).contains(httpResponse.statusCode) else {
-            throw SettingsServiceError.invalidResponse
-        }
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(AppVersionInfo.self, from: data)
     }
 
     /// 发送带 fake-cookie 的通用 GET JSON 请求。
@@ -154,6 +142,8 @@ struct SettingsNetworkService {
     }
 
     /// 手工拼装头像上传接口需要的 multipart body。
+    ///
+    /// 服务端字段名沿用 Android 端历史实现，因此这里保持 `file` 这一表单字段名不变。
     private func multipartBody(boundary: String, data: Data, filename: String) -> Data {
         // 服务端沿用 Android 端的上传接口，这里直接构造 multipart/form-data。
         var body = Data()

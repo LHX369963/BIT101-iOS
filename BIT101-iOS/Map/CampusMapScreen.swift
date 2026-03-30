@@ -12,11 +12,16 @@ import SwiftUI
 import UIKit
 
 /// 地图页用到的本地偏好键。
+///
+/// 当前地图模块只持久化“用户上次停留在哪个校区”，避免每次打开都回到默认校区。
 private enum MapPreferenceKey {
     static let selectedCampus = "map.selectedCampus"
 }
 
 /// 地图页支持的校区预设。
+///
+/// 校园地图当前不是自由搜索式地图，而是围绕几个固定校区跳转，
+/// 所以把中心点和默认半径都内置在预设里。
 private enum CampusPreset: String, CaseIterable, Identifiable {
     case liangxiang
     case zhongguancun
@@ -80,6 +85,9 @@ private enum MapFocusDestination: Equatable {
 }
 
 /// 一次地图聚焦请求的包装结构。
+///
+/// 如果只传 destination，本次请求和上一次完全相同时 SwiftUI 可能不会认为有变化。
+/// 加一层带 `UUID` 的包装后，即使目标相同，也能强制触发一次新的聚焦动作。
 private struct MapFocusRequest: Equatable {
     let id = UUID()
     let destination: MapFocusDestination
@@ -99,6 +107,7 @@ private struct MapNotice: Identifiable {
 @MainActor
 private final class CampusLocationController: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published private(set) var authorizationStatus: CLAuthorizationStatus
+    /// 当前需要直接弹给用户的定位提示。
     @Published var notice: MapNotice?
 
     private let manager = CLLocationManager()
@@ -174,9 +183,13 @@ private final class CampusLocationController: NSObject, ObservableObject, CLLoca
 struct CampusMapScreen: View {
     @AppStorage(MapPreferenceKey.selectedCampus) private var selectedCampusID = CampusPreset.liangxiang.rawValue
     @StateObject private var locationController = CampusLocationController()
+    /// SwiftUI 发给地图桥接层的聚焦请求。
     @State private var focusRequest = MapFocusRequest(destination: .preset(.liangxiang), animated: false)
+    /// “回到我的位置”动作的请求版本号。
     @State private var centerOnUserRequestID: UUID?
+    /// 如果授权弹窗尚未结束，先挂起一次回到当前位置请求。
     @State private var pendingCenterOnUserAfterAuthorization = false
+    /// 防止 `onAppear` 重复覆盖用户当前选中的校区。
     @State private var hasRestoredStoredCampus = false
 
     /// 地图主页主体。
@@ -256,6 +269,8 @@ struct CampusMapScreen: View {
 }
 
 /// 圆形悬浮按钮的统一样式。
+///
+/// 地图页的定位按钮和其它圆形入口都复用这一套样式，保持与话廊/日程悬浮按钮观感一致。
 private struct FloatingMapButton: View {
     let systemImage: String
     let action: () -> Void
@@ -274,6 +289,8 @@ private struct FloatingMapButton: View {
 }
 
 /// 校区快捷切换按钮。
+///
+/// 这里用极简的单字标签，是因为按钮空间很小；完整校区名由地图内容本身承担识别。
 private struct FloatingMapLabelButton: View {
     let label: String
     let isSelected: Bool
@@ -308,6 +325,10 @@ private struct CampusTileMapView: UIViewRepresentable {
         Coordinator()
     }
 
+    /// 创建并初始化原生 `MKMapView`。
+    ///
+    /// 之所以不使用纯 SwiftUI `Map`，是因为这里需要更细粒度地控制瓦片、相机、
+    /// attribution 处理和定位回调。
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView(frame: .zero)
         mapView.delegate = context.coordinator
@@ -330,6 +351,7 @@ private struct CampusTileMapView: UIViewRepresentable {
         return mapView
     }
 
+    /// 根据最新的 SwiftUI 状态同步地图相机、缩放和“回到我的位置”动作。
     func updateUIView(_ mapView: MKMapView, context: Context) {
         if context.coordinator.lastCenterOnUserRequestID != centerOnUserRequestID,
            let centerOnUserRequestID {
@@ -368,6 +390,7 @@ private struct CampusTileMapView: UIViewRepresentable {
         mapView.setCamera(camera, animated: animated)
     }
 
+    /// 在不改变当前中心点的前提下，仅调整缩放比例。
     private func applyScale(to mapView: MKMapView, from oldScale: Double, to newScale: Double) {
         let currentDistance = max(mapView.camera.centerCoordinateDistance, 1)
         let newDistance = currentDistance * oldScale / newScale
@@ -414,6 +437,7 @@ private struct CampusTileMapView: UIViewRepresentable {
         var lastCenterOnUserRequestID: UUID?
         private var pendingCenterOnUserRequestID: UUID?
 
+        /// 如果当前位置已经可用，就直接居中；否则切到 follow 等待下一次定位回调。
         func centerOnUser(in mapView: MKMapView, requestID: UUID) {
             if let coordinate = validUserCoordinate(from: mapView) {
                 mapView.setUserTrackingMode(.none, animated: false)
@@ -448,6 +472,7 @@ private struct CampusTileMapView: UIViewRepresentable {
             return MKTileOverlayRenderer(tileOverlay: tileOverlay)
         }
 
+        /// 过滤掉无效或缺失的用户坐标。
         private func validUserCoordinate(from mapView: MKMapView) -> CLLocationCoordinate2D? {
             guard let location = mapView.userLocation.location else {
                 return nil

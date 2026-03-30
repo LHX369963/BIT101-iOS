@@ -9,13 +9,22 @@ import ActivityKit
 import Foundation
 
 /// 课程提醒 Live Activity 的固定属性。
+///
+/// 当前只有 `studentID` 这一项静态属性，因为它足够区分“当前活动属于哪个账号”。
+/// 其余会随课程变化的字段都放进 `ContentState`，便于实时更新。
 struct CourseReminderActivityAttributes: ActivityAttributes {
     public struct ContentState: Codable, Hashable {
+        /// 当前展示的是“上课”还是“日程”。
         let kindText: String
+        /// 课程名或自定义日程标题。
         let title: String
+        /// 教室或自定义日程副标题。
         let classroom: String
+        /// 教师名；自定义日程通常为空。
         let teacher: String
+        /// 当前项开始时间。
         let startDate: Date
+        /// 当前项结束时间。
         let endDate: Date
     }
 
@@ -23,6 +32,8 @@ struct CourseReminderActivityAttributes: ActivityAttributes {
 }
 
 /// 根据当前课表或自定义日程挑出来的“当前项 / 下一项”。
+///
+/// 这是一份只在 Live Activity 选择阶段使用的临时结构，不落盘，也不暴露给视图层。
 private struct CourseReminderOccurrence {
     let kindText: String
     let title: String
@@ -44,6 +55,11 @@ final class ScheduleLiveActivityManager {
     private init() {}
 
     /// 从当前账号的课表缓存中刷新灵动岛提醒。
+    ///
+    /// 刷新策略非常保守：
+    /// 1. 先确认系统支持并且用户允许 Live Activities。
+    /// 2. 再检查本地开关是否开启。
+    /// 3. 最后才从缓存里推导“当前项/下一项”。
     func refreshFromCurrentCache() async {
         guard #available(iOS 16.2, *) else { return }
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
@@ -79,6 +95,7 @@ final class ScheduleLiveActivityManager {
         let content = ActivityContent(state: state, staleDate: staleDate)
 
         if let activity = Activity<CourseReminderActivityAttributes>.activities.first {
+            // 如果账号已经切换，则旧活动必须立刻结束，避免上一账号的课程继续挂在岛上。
             if activity.attributes.studentID != attributes.studentID {
                 await activity.end(nil, dismissalPolicy: .immediate)
                 _ = try? Activity.request(attributes: attributes, content: content)
@@ -98,6 +115,12 @@ final class ScheduleLiveActivityManager {
         }
     }
 
+    /// 从课表缓存和自定义日程中挑出“当前最值得展示”的一项。
+    ///
+    /// 规则是：
+    /// 1. 先收集所有未来仍未结束的正式课程和自定义日程。
+    /// 2. 按开始时间排序。
+    /// 3. 优先选择“正在进行中”的项；否则选择落在提前提醒阈值内的下一项。
     private func nextRelevantOccurrence(from cache: ScheduleCache, firstDay: Date?, leadMinutes: Int) -> CourseReminderOccurrence? {
         let slotMap = Dictionary(uniqueKeysWithValues: cache.timeTable.map { ($0.id, $0) })
         let now = Date()
@@ -173,6 +196,7 @@ final class ScheduleLiveActivityManager {
         }
     }
 
+    /// 把某一天和 `HH:mm` 文本拼成精确时间点。
     private func combine(date: Date, time: String) -> Date? {
         let parts = time.split(separator: ":")
         guard parts.count == 2, let hour = Int(parts[0]), let minute = Int(parts[1]) else {
@@ -186,6 +210,7 @@ final class ScheduleLiveActivityManager {
         return ScheduleDateCodec.calendar.date(from: components)
     }
 
+    /// 把“首周 + 教学周 + 星期几 + 节次时间”拼成真实上课时间。
     private func combine(firstDay: Date, week: Int, weekday: Int, time: String) -> Date? {
         let dayOffset = (week - 1) * 7 + (weekday - 1)
         guard let day = ScheduleDateCodec.calendar.date(byAdding: .day, value: dayOffset, to: firstDay) else {
@@ -204,12 +229,14 @@ final class ScheduleLiveActivityManager {
         return ScheduleDateCodec.calendar.date(from: components)
     }
 
+    /// 对教室名称做轻量缩写，尽量压缩灵动岛和锁屏组件的展示宽度。
     private func normalizeClassroom(_ value: String) -> String {
         value
             .replacingOccurrences(of: "理教楼", with: "理教")
             .replacingOccurrences(of: "文萃楼", with: "文萃")
     }
 
+    /// 对课程名做轻量归一化，去掉不必要的前缀噪音。
     private func normalizeCourseTitle(_ value: String) -> String {
         if value.hasPrefix("体育/") {
             return String(value.dropFirst("体育/".count))

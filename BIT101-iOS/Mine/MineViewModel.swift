@@ -8,19 +8,57 @@
 import Combine
 import Foundation
 
+/// “我的”列表分页触发条件。
+///
+/// 只有滚动到尾部附近、当前不在加载中且服务端仍有更多数据时，才允许继续翻页。
+private func mineShouldLoadMore<T: Identifiable>(currentID: T.ID, state: MinePagedState<T>) -> Bool where T.ID: Equatable {
+    guard
+        state.status == .loaded,
+        !state.isLoadingMore,
+        state.canLoadMore,
+        state.items.suffix(4).contains(where: { $0.id == currentID })
+    else {
+        return false
+    }
+
+    return true
+}
+
+/// “我的”模块统一使用的取消错误判断。
+///
+/// 页面切换、下拉刷新和任务复用时都可能触发取消，这里集中兼容 Swift Concurrency 与 URLSession 两类信号。
+private func isMineCancellation(_ error: Error) -> Bool {
+    if error is CancellationError {
+        return true
+    }
+
+    if let urlError = error as? URLError, urlError.code == .cancelled {
+        return true
+    }
+
+    let nsError = error as NSError
+    return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+}
+
 @MainActor
 /// “我的”页状态机。
 ///
 /// 负责资料卡刷新，以及粉丝、关注、帖子三个分页列表的加载。
 final class MineViewModel: ObservableObject {
+    /// 当前登录用户的资料卡信息。
     @Published private(set) var userInfo: MineUserInfo?
+    /// 资料卡加载状态。
     @Published private(set) var profileStatus: MineLoadStatus = .idle
+    /// 粉丝列表分页状态。
     @Published private(set) var followerState = MinePagedState<GalleryUser>()
+    /// 关注列表分页状态。
     @Published private(set) var followingState = MinePagedState<GalleryUser>()
+    /// 我的帖子列表分页状态。
     @Published private(set) var posterState = MinePagedState<GalleryPoster>()
     @Published var alert: LoginAlert?
 
     private let service: MineService
+    /// 防止主页首次加载逻辑重复执行。
     private var hasBootstrapped = false
 
     init(service: MineService) {
@@ -32,6 +70,8 @@ final class MineViewModel: ObservableObject {
     }
 
     /// 首次进入“我的”页时预加载资料卡和帖子数。
+    ///
+    /// 粉丝和关注列表保持按需进入时再加载，避免首页启动就拉太多接口。
     func bootstrapIfNeeded() async {
         guard !hasBootstrapped else { return }
         hasBootstrapped = true
@@ -54,6 +94,8 @@ final class MineViewModel: ObservableObject {
     }
 
     /// 刷新个人资料卡。
+    ///
+    /// 如果页面上已经有旧资料，刷新失败时保留旧内容，只弹出提示。
     func refreshProfile() async {
         let hadUserInfo = userInfo != nil || profileStatus == .loaded
         if !hadUserInfo {
@@ -64,7 +106,7 @@ final class MineViewModel: ObservableObject {
             userInfo = try await service.fetchMyInfo()
             profileStatus = .loaded
         } catch {
-            if isCancellation(error) {
+            if isMineCancellation(error) {
                 profileStatus = hadUserInfo ? .loaded : .idle
                 return
             }
@@ -82,6 +124,8 @@ final class MineViewModel: ObservableObject {
     }
 
     /// 重新拉取粉丝第一页。
+    ///
+    /// 这里采用“整页重置再请求”的策略，因为粉丝/关注量通常不大，简单可靠比局部 diff 更重要。
     func refreshFollowers() async {
         followerState.status = .loading
         followerState.items = []
@@ -105,7 +149,7 @@ final class MineViewModel: ObservableObject {
     /// 粉丝列表的分页加载。
     func loadMoreFollowersIfNeeded(currentUser: GalleryUser?) async {
         guard let currentUser else { return }
-        guard shouldLoadMore(currentID: currentUser.id, state: followerState) else { return }
+        guard mineShouldLoadMore(currentID: currentUser.id, state: followerState) else { return }
 
         followerState.isLoadingMore = true
         do {
@@ -144,7 +188,7 @@ final class MineViewModel: ObservableObject {
     /// 关注列表的分页加载。
     func loadMoreFollowingsIfNeeded(currentUser: GalleryUser?) async {
         guard let currentUser else { return }
-        guard shouldLoadMore(currentID: currentUser.id, state: followingState) else { return }
+        guard mineShouldLoadMore(currentID: currentUser.id, state: followingState) else { return }
 
         followingState.isLoadingMore = true
         do {
@@ -160,6 +204,8 @@ final class MineViewModel: ObservableObject {
     }
 
     /// 重新拉取“我的帖子”第一页。
+    ///
+    /// 如果当前已经有旧帖子，则刷新失败时会保留旧内容并只弹提示，避免整个页面回退成空态。
     func refreshPosters() async {
         let hadPosters = !posterState.items.isEmpty || posterState.status == .loaded
         if !hadPosters {
@@ -180,7 +226,7 @@ final class MineViewModel: ObservableObject {
         } catch {
             posterState.isLoadingMore = false
 
-            if isCancellation(error) {
+            if isMineCancellation(error) {
                 posterState.status = hadPosters ? .loaded : .idle
                 return
             }
@@ -200,7 +246,7 @@ final class MineViewModel: ObservableObject {
     /// “我的帖子”列表的分页加载。
     func loadMorePostersIfNeeded(currentPoster: GalleryPoster?) async {
         guard let currentPoster else { return }
-        guard shouldLoadMore(currentID: currentPoster.id, state: posterState) else { return }
+        guard mineShouldLoadMore(currentID: currentPoster.id, state: posterState) else { return }
 
         posterState.isLoadingMore = true
         do {
@@ -215,33 +261,6 @@ final class MineViewModel: ObservableObject {
         }
     }
 
-    /// 判断当前滚动位置是否已经足够接近列表尾部，可以安全触发分页。
-    private func shouldLoadMore<T: Identifiable>(currentID: T.ID, state: MinePagedState<T>) -> Bool where T.ID: Equatable {
-        guard
-            state.status == .loaded,
-            !state.isLoadingMore,
-            state.canLoadMore,
-            state.items.suffix(4).contains(where: { $0.id == currentID })
-        else {
-            return false
-        }
-
-        return true
-    }
-
-    /// 同时兼容 Swift Concurrency 与 URLSession 的取消错误。
-    private func isCancellation(_ error: Error) -> Bool {
-        if error is CancellationError {
-            return true
-        }
-
-        if let urlError = error as? URLError, urlError.code == .cancelled {
-            return true
-        }
-
-        let nsError = error as NSError
-        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
-    }
 }
 
 @MainActor
@@ -249,13 +268,17 @@ final class MineViewModel: ObservableObject {
 ///
 /// 负责拉取指定用户的公开资料和帖子列表，供话题详情里的“查看主页”复用。
 final class UserProfileViewModel: ObservableObject {
+    /// 他人主页资料卡。
     @Published private(set) var userInfo: MineUserInfo?
+    /// 资料卡加载状态。
     @Published private(set) var profileStatus: MineLoadStatus = .idle
+    /// 他人帖子列表分页状态。
     @Published private(set) var posterState = MinePagedState<GalleryPoster>()
     @Published var alert: LoginAlert?
 
     private let userID: Int
     private let service: MineService
+    /// 防止首次加载逻辑重复执行。
     private var hasBootstrapped = false
 
     init(userID: Int, service: MineService) {
@@ -268,6 +291,8 @@ final class UserProfileViewModel: ObservableObject {
     }
 
     /// 首次进入主页时预加载资料和第一页帖子。
+    ///
+    /// 他人主页和“我的”页不同，没有粉丝/关注分页，因此这里只并发拉资料与帖子两块内容。
     func bootstrapIfNeeded() async {
         guard !hasBootstrapped else { return }
         hasBootstrapped = true
@@ -287,6 +312,8 @@ final class UserProfileViewModel: ObservableObject {
     }
 
     /// 同时刷新资料卡和帖子列表。
+    ///
+    /// 资料卡和帖子列表相互独立，因此这里并发请求，缩短进入主页后的首屏等待时间。
     func refreshAll() async {
         async let infoTask: Void = refreshProfile()
         async let posterTask: Void = refreshPosters()
@@ -304,7 +331,7 @@ final class UserProfileViewModel: ObservableObject {
             userInfo = try await service.fetchUserInfo(id: userID)
             profileStatus = .loaded
         } catch {
-            if isCancellation(error) {
+            if isMineCancellation(error) {
                 profileStatus = hadUserInfo ? .loaded : .idle
                 return
             }
@@ -342,7 +369,7 @@ final class UserProfileViewModel: ObservableObject {
         } catch {
             posterState.isLoadingMore = false
 
-            if isCancellation(error) {
+            if isMineCancellation(error) {
                 posterState.status = hadPosters ? .loaded : .idle
                 return
             }
@@ -362,7 +389,7 @@ final class UserProfileViewModel: ObservableObject {
     /// 指定用户帖子列表分页加载。
     func loadMorePostersIfNeeded(currentPoster: GalleryPoster?) async {
         guard let currentPoster else { return }
-        guard shouldLoadMore(currentID: currentPoster.id, state: posterState) else { return }
+        guard mineShouldLoadMore(currentID: currentPoster.id, state: posterState) else { return }
 
         posterState.isLoadingMore = true
         do {
@@ -377,31 +404,4 @@ final class UserProfileViewModel: ObservableObject {
         }
     }
 
-    /// 判断当前滚动位置是否已经接近列表尾部，可以触发下一页。
-    private func shouldLoadMore<T: Identifiable>(currentID: T.ID, state: MinePagedState<T>) -> Bool where T.ID: Equatable {
-        guard
-            state.status == .loaded,
-            !state.isLoadingMore,
-            state.canLoadMore,
-            state.items.suffix(4).contains(where: { $0.id == currentID })
-        else {
-            return false
-        }
-
-        return true
-    }
-
-    /// 同时兼容 Swift Concurrency 与 URLSession 的取消错误。
-    private func isCancellation(_ error: Error) -> Bool {
-        if error is CancellationError {
-            return true
-        }
-
-        if let urlError = error as? URLError, urlError.code == .cancelled {
-            return true
-        }
-
-        let nsError = error as NSError
-        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
-    }
 }

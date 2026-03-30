@@ -8,6 +8,9 @@
 import SwiftUI
 
 /// “我的”页内部导航。
+///
+/// 这里仅收敛“我的主页内部会继续 push 的三个子列表”，设置页单独走另一条路由，
+/// 避免把两类导航状态混在一起。
 private enum MineRoute: Hashable, Identifiable {
     case followers
     case followings
@@ -21,14 +24,20 @@ private enum MineRoute: Hashable, Identifiable {
 ///
 /// 顶部结构尽量向 Android 对齐，但交互仍然走 iOS 的导航和列表风格。
 struct MineRootView: View {
+    /// 兜底学号，用于传给设置页的账号区域。
     let fallbackStudentID: String
     let onLogout: () -> Void
 
+    /// “我的”主页状态机。
     @StateObject private var viewModel = MineViewModel()
+    /// 粉丝 / 关注 / 帖子子列表路由。
     @State private var route: MineRoute?
+    /// 设置页内部路由。
     @State private var settingsRoute: SettingsRoute?
 
     /// “我的”主页主体。
+    ///
+    /// 主页面本身只展示资料卡和设置入口；更长的列表内容都拆到子页面里，避免主页滚动层级过深。
     var body: some View {
         List {
             Section {
@@ -120,6 +129,8 @@ struct MineRootView: View {
     }
 
     /// 设置入口列表。
+    ///
+    /// 这些入口最终都会跳进同一个 `SettingsRootView`，这里只负责展示“入口列表”这一层。
     private var settingsSection: some View {
         ForEach(SettingsRoute.allCases) { route in
             Button {
@@ -159,6 +170,7 @@ struct MineRootView: View {
 struct UserProfileRootView: View {
     let userID: Int
 
+    /// 指定用户主页状态机。
     @StateObject private var viewModel: UserProfileViewModel
     @ObservedObject private var settings = AppSettingsStore.shared
     @State private var selectedPoster: GalleryPoster?
@@ -234,6 +246,7 @@ struct UserProfileRootView: View {
 
     @ViewBuilder
     private var posterSection: some View {
+        // 他人主页也沿用社区本地治理过滤，避免被你屏蔽的用户/帖子在这里重新出现。
         let visiblePosters = CommunityModeration
             .filterVisiblePosters(viewModel.posterState.items, snapshot: settings.snapshot)
 
@@ -300,6 +313,9 @@ struct UserProfileRootView: View {
 }
 
 /// 个人信息卡片。
+///
+/// “我的主页”和“他人主页”都共用这张卡片，因此这里只负责纯展示，
+/// 不直接耦合导航和页面级状态。
 private struct MineProfileCard: View {
     let info: MineUserInfo
     let posterCountText: String
@@ -378,6 +394,8 @@ private struct MineProfileCard: View {
 }
 
 /// 粉丝 / 关注 列表页。
+///
+/// 这个页面只关心一类用户数组的展示与分页，因此通过闭包把刷新和加载更多回传给上层 ViewModel。
 private struct MineUserListView: View {
     let title: String
     let users: [GalleryUser]
@@ -485,6 +503,7 @@ private struct MinePosterListView: View {
     private let service = GalleryService()
 
     var body: some View {
+        // 这里同时叠加“社区屏蔽规则”和“本地刚删掉但服务端还没刷新回来”的过滤。
         let visiblePosters = CommunityModeration
             .filterVisiblePosters(posters, snapshot: settings.snapshot)
             .filter { !deletedPosterIDs.contains($0.id) }
@@ -590,6 +609,7 @@ private struct MinePosterListView: View {
         return false
     }
 
+    /// 删除帖子后先本地移除，再请求上层刷新列表。
     private func deletePoster(_ poster: GalleryPoster) async {
         do {
             try await service.deletePoster(id: poster.id)
@@ -605,6 +625,8 @@ private struct MinePosterListView: View {
 }
 
 /// 我的页资料卡上的统计按钮。
+///
+/// 同一套组件同时兼容“可点”和“纯展示”两种状态：有 action 时就是按钮，没有 action 时就是静态文案。
 private struct MineStatButton: View {
     let number: String
     let title: String
@@ -636,6 +658,8 @@ private struct MineStatButton: View {
 }
 
 /// 我的页使用的日期格式化工具。
+///
+/// 当前这个工具主要作为历史兼容保留，便于后续如果重新恢复“加入时间”等展示时直接复用。
 private enum MineDateDecoder {
     private static let sourceFormatters: [DateFormatter] = [
         makeFormatter("yyyy-MM-dd HH:mm:ss"),
@@ -664,6 +688,8 @@ private enum MineDateDecoder {
 }
 
 /// 我的页使用的颜色解码工具。
+///
+/// 用户身份颜色来自服务端十六进制字符串，因此在“我的”模块里单独保留一个轻量解码器。
 private enum MineColorDecoder {
     static func color(from hex: String) -> Color? {
         let sanitized = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)

@@ -83,6 +83,12 @@ struct AppShellView: View {
     @State private var requestedScheduleSection: ScheduleSection?
 
     /// 登录后的应用壳层主体。
+    ///
+    /// 这里同时承担：
+    /// 1. 底部 tab 容器
+    /// 2. 话廊 EULA 拦截
+    /// 3. 开屏公告弹窗
+    /// 4. 小组件/深链路由分发
     var body: some View {
         TabView(selection: tabSelection) {
             ForEach(settings.visibleTabs) { tab in
@@ -166,6 +172,8 @@ struct AppShellView: View {
     }
 
     /// 处理来自小组件等入口的 app 深链。
+    ///
+    /// 当前仅接 `bit101://schedule/courses` 这一类深链，但集中收口到这里，后续继续扩展其它页面入口会更顺。
     private func handleIncomingURL(_ url: URL) {
         guard url.scheme?.lowercased() == "bit101" else { return }
 

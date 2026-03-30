@@ -10,10 +10,16 @@ import Foundation
 import SwiftUI
 
 extension Notification.Name {
+    /// 登录存储变化通知。
+    ///
+    /// 多账号隔离设置、小组件和日程缓存都会用这条通知感知账号切换。
     static let loginStorageDidChange = Notification.Name("BIT101.LoginStorageDidChange")
 }
 
 /// 应用层主题模式。
+///
+/// 这里是持久化层使用的主题枚举，而不是直接暴露 SwiftUI 的 `ColorScheme`，
+/// 这样可以安全存储到 `UserDefaults`，也能保留“跟随系统”这一语义。
 enum AppThemeMode: String, CaseIterable, Identifiable, Codable {
     case system
     case light
@@ -42,6 +48,8 @@ enum AppThemeMode: String, CaseIterable, Identifiable, Codable {
 }
 
 /// 被用户本地隐藏的帖子摘要。
+///
+/// 只保存恢复显示需要的最小字段，不复制整份帖子详情。
 struct HiddenPosterRecord: Codable, Equatable, Identifiable, Hashable {
     let id: Int
     let title: String
@@ -51,6 +59,8 @@ struct HiddenPosterRecord: Codable, Equatable, Identifiable, Hashable {
 }
 
 /// 持久化到 `UserDefaults` 的设置快照。
+///
+/// 这是整个 app 的“设置真相来源”。UI 层只改这里，真正的读写、账号隔离和默认值全由这份快照承接。
 struct AppSettingsSnapshot: Codable, Equatable {
     /// 启动后默认选中的 tab。
     var homeTab: AppTab = .schedule
@@ -84,9 +94,13 @@ struct AppSettingsSnapshot: Codable, Equatable {
 /// 页面顺序、主题、画廊过滤规则等都会统一写入这里，再由具体页面按需读取。
 final class AppSettingsStore: ObservableObject {
     static let shared = AppSettingsStore()
+    /// 各账号设置快照在 `UserDefaults` 中使用的 key 前缀。
     nonisolated static let storageKeyPrefix = "app.settings.snapshot"
+    /// 当前社区规则版本号；版本提升后会强制重新弹出规则确认。
     nonisolated static let currentCommunityRulesVersion = 2
+    /// 当前开屏公告版本号；变化后会重新展示一次。
     nonisolated static let currentStartupNoticeVersion = "1.1.0"
+    /// 开屏公告已读状态对应的全局 key。
     nonisolated static let startupNoticeSeenKey = "app.startup.notice.seen.version"
 
     @Published private(set) var snapshot = AppSettingsSnapshot()
@@ -94,6 +108,7 @@ final class AppSettingsStore: ObservableObject {
     private let defaults = UserDefaults.standard
     private var accountObserver: NSObjectProtocol?
 
+    /// 初始化设置仓库，并监听账号切换。
     private init() {
         load()
         accountObserver = NotificationCenter.default.addObserver(
@@ -114,6 +129,7 @@ final class AppSettingsStore: ObservableObject {
         }
     }
 
+    /// 以下计算属性用于给视图层提供只读入口，避免页面直接改写 snapshot。
     var homeTab: AppTab { snapshot.homeTab }
     var pageOrder: [AppTab] { snapshot.pageOrder }
     var hiddenTabs: [AppTab] { snapshot.hiddenTabs }
@@ -181,6 +197,8 @@ final class AppSettingsStore: ObservableObject {
     }
 
     /// 一次性更新画廊治理相关设置。
+    ///
+    /// 这些偏好会和当前学号一起隔离存储，不会在切号后串到别的账号上。
     func updateGallerySettings(
         hideBotPosterInSearch: Bool? = nil,
         hideStrictMode: Bool? = nil,
@@ -268,6 +286,8 @@ final class AppSettingsStore: ObservableObject {
     }
 
     /// 从 `UserDefaults` 加载设置快照。
+    ///
+    /// 账号切换通知会重新触发这里，因此这里不做任何副作用操作，只负责恢复快照。
     private func load() {
         guard let snapshot = Self.loadSnapshotFromDefaults() else {
             self.snapshot = AppSettingsSnapshot()
@@ -279,6 +299,8 @@ final class AppSettingsStore: ObservableObject {
     }
 
     /// 把当前快照写回 `UserDefaults`。
+    ///
+    /// 所有设置入口最终都汇总到这里落盘，保证同一账号只维护一份快照。
     private func save() {
         if let data = try? JSONEncoder().encode(snapshot) {
             defaults.set(data, forKey: currentStorageKey)
@@ -305,10 +327,12 @@ final class AppSettingsStore: ObservableObject {
         Self.storageKey(for: Self.currentAccountIdentifier())
     }
 
+    /// 按账号生成设置快照的存储 key。
     private static func storageKey(for accountID: String) -> String {
         "\(storageKeyPrefix).\(accountID)"
     }
 
+    /// 读取当前账号标识；未登录时统一回退到默认分区。
     private static func currentAccountIdentifier() -> String {
         let raw = LoginStorage.shared.currentStudentID.trimmingCharacters(in: .whitespacesAndNewlines)
         return raw.isEmpty ? "__default__" : raw

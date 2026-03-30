@@ -62,6 +62,8 @@ private enum ScheduleURLUpgrade {
 }
 
 /// 日程同步过程中的统一错误。
+///
+/// 这层错误枚举主要服务 UI 展示；更底层的接口差异、字段缺失等问题会在这里统一折叠成少量用户可理解的文案。
 enum ScheduleServiceError: LocalizedError {
     case notLoggedIn
     case invalidResponse
@@ -86,6 +88,8 @@ enum ScheduleServiceError: LocalizedError {
 }
 
 /// 同步课程表和考试后的组合结果。
+///
+/// 课程、考试和首周日期来自不同接口，但在“同步课表”这个业务动作里必须一起更新，所以组合成一个返回体。
 struct CourseSyncPayload {
     let term: String
     let firstDayString: String
@@ -94,6 +98,8 @@ struct CourseSyncPayload {
 }
 
 /// 同步 DDL 后的组合结果。
+///
+/// 乐学同步除了事件列表外，还可能拿到新的订阅 URL，因此一起返回给上层缓存。
 struct DDLSyncPayload {
     let url: String
     let events: [DDLEventRecord]
@@ -111,6 +117,7 @@ struct ScheduleService {
     private let session: URLSession
     private let redirectDelegate = HTTPSUpgradingRedirectDelegate()
 
+    /// 构造带共享 cookie 与 HTTPS 升级能力的会话。
     init() {
         let configuration = URLSessionConfiguration.default
         configuration.httpCookieStorage = HTTPCookieStorage.shared
@@ -124,6 +131,8 @@ struct ScheduleService {
     }
 
     /// 同步课表、考试和首周日期。
+    ///
+    /// 这三个结果会同时影响课表页面、当前周计算、小组件和灵动岛，所以同步时必须成套获取。
     func syncCourses() async throws -> CourseSyncPayload {
         try await ensureSchoolSession()
         try await prepareJXZX()
@@ -142,6 +151,8 @@ struct ScheduleService {
     }
 
     /// 只查询当前学期，不拉完整课表。
+    ///
+    /// 主要用于空教室页只需要学期编码但不需要整份课表时的轻量查询。
     func fetchCurrentTermOnly() async throws -> String {
         try await ensureSchoolSession()
         try await prepareJXZX()
@@ -149,6 +160,8 @@ struct ScheduleService {
     }
 
     /// 同步乐学 DDL，并尽量复用已缓存的订阅地址。
+    ///
+    /// 订阅 URL 一般比较稳定，因此优先复用缓存；只有缓存不存在时才回退到网页抓取。
     func syncDDLEvents(existingEvents: [DDLEventRecord], storedURL: String) async throws -> DDLSyncPayload {
         try await ensureSchoolSession()
 
@@ -178,6 +191,8 @@ struct ScheduleService {
     }
 
     /// 查询空教室页可选校区列表。
+    ///
+    /// 这一步相当于空教室查询的元数据预热，不涉及具体教室占用。
     func fetchCampuses() async throws -> [CampusRecord] {
         try await ensureSchoolSession()
         try await prepareJXZX()
@@ -192,6 +207,8 @@ struct ScheduleService {
     }
 
     /// 查询某个校区下的教学楼列表。
+    ///
+    /// 教学楼会在进入空教室页时结合“最近下一节课的楼宇”做自动匹配。
     func fetchBuildings(campusCode: String?) async throws -> [BuildingRecord] {
         try await ensureSchoolSession()
         try await prepareJXZX()
@@ -219,6 +236,8 @@ struct ScheduleService {
     }
 
     /// 查询某个教学楼当天的教室占用情况。
+    ///
+    /// 空教室接口以“当天 + 教学楼”为粒度返回占用节次，后续再在 ViewModel 层按选中的时段块格式化。
     func fetchClassrooms(buildingID: String, term: String) async throws -> [ClassroomRecord] {
         try await ensureSchoolSession()
         try await prepareJXZX()
@@ -253,6 +272,8 @@ struct ScheduleService {
     }
 
     /// 确保学校侧登录态仍然有效。
+    ///
+    /// 日程模块大量依赖学校接口，因此在真正请求前先复用 `LoginService.checkLogin()` 做兜底校验。
     private func ensureSchoolSession() async throws {
         guard try await LoginService().checkLogin() != nil else {
             throw ScheduleServiceError.notLoggedIn
@@ -260,6 +281,8 @@ struct ScheduleService {
     }
 
     /// 教务系统接口请求前的预热步骤。
+    ///
+    /// 学校教务接口存在“未预热直接请求会失败”的历史行为，因此这里保留一组轻量预热访问。
     private func prepareJXZX() async throws {
         // 学校教务接口依赖若干预热请求，否则后续接口会直接返回未初始化状态。
         _ = try await sendStringRequest(path: "/jwapp/sys/funauthapp/api/getAppConfig/wdkbby-5959167891382285.do")
@@ -280,6 +303,8 @@ struct ScheduleService {
     }
 
     /// 拉取当前学期课程表。
+    ///
+    /// 这里会把学校接口里稀疏且命名古老的字段，统一规整成 iOS 端自己的 `CourseRecord`。
     private func fetchCourses(term: String) async throws -> [CourseRecord] {
         let response: CourseResponse = try await sendJSONRequest(
             path: "/jwapp/sys/wdkbby/modules/xskcb/cxxszhxqkb.do",
@@ -314,6 +339,7 @@ struct ScheduleService {
         }
     }
 
+    /// 拉取当前学期考试安排。
     private func fetchExams(term: String) async throws -> [ExamRecord] {
         let response: ExamResponse = try await sendJSONRequest(
             path: "/jwapp/sys/wdksapMobile/modules/ksap/cxxsksap.do",
@@ -350,6 +376,9 @@ struct ScheduleService {
         }
     }
 
+    /// 获取当前学期首周日期。
+    ///
+    /// 课表当前周数、小组件时间线和灵动岛课程推导都依赖这个日期基准。
     private func fetchFirstDayString(term: String) async throws -> String {
         let requestParam = #"{"XNXQDM":"\#(term)","ZC":"1"}"#
         let response: WeekDateResponse = try await sendJSONRequest(
@@ -365,6 +394,10 @@ struct ScheduleService {
         return firstDay
     }
 
+    /// 解析乐学日历订阅 URL。
+    ///
+    /// 乐学页面会把真正的订阅链接埋在 HTML 中，而且可能混用 `webcal://`、`http://` 与 HTML 转义，
+    /// 所以这里要做一整套兜底提取。
     private func resolveLexueCalendarURL(storedURL: String) async throws -> String {
         if !storedURL.isEmpty {
             return storedURL
@@ -408,6 +441,7 @@ struct ScheduleService {
         return ScheduleURLUpgrade.upgradedURLString(from: fullURL)
     }
 
+    /// 下载并解析乐学 ICS 数据。
     private func fetchLexueEvents(urlString: String) async throws -> [DDLEventRecord] {
         // 订阅链接可能以 webcal:// 或 http:// 返回，这里统一标准化后再拉取 ICS。
         let secureURLString = ScheduleURLUpgrade.upgradedURLString(from: urlString)
@@ -421,6 +455,9 @@ struct ScheduleService {
         return try parseICS(ics)
     }
 
+    /// 把乐学导出的 ICS 文本解析成 DDL 事件。
+    ///
+    /// 当前只取 `UID / SUMMARY / DTSTART / DESCRIPTION / CATEGORIES` 这些真正用于 DDL 展示的字段。
     private func parseICS(_ ics: String) throws -> [DDLEventRecord] {
         // iCalendar 允许折行，这里先展开，再逐个 VEVENT 解析。
         let unfolded = ics
@@ -479,6 +516,7 @@ struct ScheduleService {
         return events.sorted { $0.dueAt < $1.dueAt }
     }
 
+    /// 解析 ICS 中常见的三种日期格式。
     private func parseICSDate(_ string: String) -> Date? {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
@@ -501,6 +539,7 @@ struct ScheduleService {
         return formatter.date(from: string)
     }
 
+    /// 还原 ICS 字段里的转义字符。
     private func decodeICSValue(_ value: String) -> String {
         value
             .replacingOccurrences(of: #"\\n"#, with: "\n", options: .regularExpression)
@@ -509,6 +548,9 @@ struct ScheduleService {
             .replacingOccurrences(of: #"\\\\"#, with: "\\", options: .regularExpression)
     }
 
+    /// 发送教务/乐学 JSON 请求并自动解码响应。
+    ///
+    /// 学校接口大量使用表单 POST + JSON 返回，因此这里统一封装。
     private func sendJSONRequest<Response: Decodable>(
         baseURL: URL? = nil,
         path: String,
@@ -535,6 +577,7 @@ struct ScheduleService {
         }
     }
 
+    /// 发送返回字符串正文的请求，主要用于 HTML 页和 ICS 文件。
     private func sendStringRequest(
         baseURL: URL? = nil,
         path: String,
@@ -560,6 +603,7 @@ struct ScheduleService {
         return String(decoding: data, as: UTF8.self)
     }
 
+    /// 统一底层请求入口，并在发起前做 HTTPS 升级。
     private func sendRequest(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let secureRequest: URLRequest
         if let url = request.url, let upgradedURL = ScheduleURLUpgrade.upgradedURL(from: url), upgradedURL != url {
@@ -584,10 +628,12 @@ struct ScheduleService {
         return (data, httpResponse)
     }
 
+    /// 组装最终请求 URL，兼容绝对路径与相对路径。
     private func buildURL(baseURL: URL, path: String) -> URL {
         URL(string: path, relativeTo: baseURL)?.absoluteURL ?? baseURL.appending(path: path)
     }
 
+    /// 用正则从乐学页面里尝试提取订阅链接。
     private func extractCalendarURL(from html: String, pattern: String) -> String? {
         html.captureGroups(pattern: pattern, options: [.dotMatchesLineSeparators]).first
             .map { rawURLString in
@@ -601,6 +647,7 @@ struct ScheduleService {
             }
     }
 
+    /// 还原 HTML 属性里的常见实体转义。
     private func decodeHTML(urlString: String) -> String {
         urlString
             .replacingOccurrences(of: "&amp;", with: "&")
@@ -608,6 +655,7 @@ struct ScheduleService {
             .replacingOccurrences(of: "&quot;", with: "\"")
     }
 
+    /// 把字段组装成 `application/x-www-form-urlencoded` 表单体。
     private func formBody(_ fields: [(String, String)]) -> Data {
         let encoded = fields.map { key, value in
             "\(urlEncode(key))=\(urlEncode(value))"
@@ -617,12 +665,14 @@ struct ScheduleService {
         return Data(encoded.utf8)
     }
 
+    /// 表单值专用 URL 编码。
     private func urlEncode(_ value: String) -> String {
         var allowed = CharacterSet.urlQueryAllowed
         allowed.remove(charactersIn: "&+=?")
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
+    /// 把 HTTP 状态码包装成统一错误。
     private func httpError(_ statusCode: Int) -> NSError {
         NSError(
             domain: "BIT101.Schedule",

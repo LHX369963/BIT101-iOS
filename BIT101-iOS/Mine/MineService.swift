@@ -8,6 +8,8 @@
 import Foundation
 
 /// “我的”页接口层错误。
+///
+/// 这里故意只保留少量、面向 UI 的错误分类；更底层的 HTTP 状态码会在必要时转成通用 NSError。
 enum MineServiceError: LocalizedError {
     case notLoggedIn
     case invalidResponse
@@ -23,11 +25,18 @@ enum MineServiceError: LocalizedError {
 }
 
 /// “我的”页网络层。
+///
+/// 这层只负责“我的”和“他人主页”会共用到的资料卡、关注关系和帖子列表请求，
+/// 不承载任何页面状态，也不做分页拼接。
 struct MineService {
+    /// 个人主页相关接口根地址。
     private let baseURL = URL(string: "https://bit101.flwfdd.xyz")!
     private let session: URLSession
     private let storage: LoginStorage
 
+    /// 初始化带 fake-cookie 的会话。
+    ///
+    /// “我的”页和话题页共用同一份登录存储，因此这里沿用系统 cookie 容器。
     init(storage: LoginStorage = .shared) {
         self.storage = storage
 
@@ -39,6 +48,8 @@ struct MineService {
     }
 
     /// 获取当前登录用户自己的资料卡信息。
+    ///
+    /// 服务端以 `0` 作为“当前用户”的占位 ID，所以“我的主页”和“他人主页”需要分别走不同接口路径。
     func fetchMyInfo() async throws -> MineUserInfo {
         try await sendJSONRequest(path: "user/info/0")
     }
@@ -49,6 +60,8 @@ struct MineService {
     }
 
     /// 获取我关注的用户列表。
+    ///
+    /// 关注/粉丝接口都使用页码分页，第一页从 0 开始。
     func fetchFollowings(page: Int) async throws -> [GalleryUser] {
         try await sendJSONRequest(path: "user/followings", queryItems: [URLQueryItem(name: "page", value: String(page))])
     }
@@ -73,6 +86,8 @@ struct MineService {
     }
 
     /// 获取指定用户的帖子列表。
+    ///
+    /// 这里沿用帖子搜索接口的 `uid` 语义，而不是单独的“用户帖子”接口。
     func fetchUserPosters(userID: Int, page: Int) async throws -> [GalleryPoster] {
         try await sendJSONRequest(
             path: "posters",
@@ -85,6 +100,8 @@ struct MineService {
     }
 
     /// 发送带 fake-cookie 的通用 GET JSON 请求。
+    ///
+    /// “我的”相关接口目前都是简单的 GET JSON，这里集中处理鉴权、状态码和解码错误。
     private func sendJSONRequest<Response: Decodable>(
         path: String,
         queryItems: [URLQueryItem] = []

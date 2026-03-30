@@ -9,6 +9,8 @@ import Combine
 import Foundation
 
 /// 日程页统一使用的提示模型。
+///
+/// 日程模块内部的同步、保存、空教室查询等动作都会通过这个统一提示模型把错误抛给视图层。
 struct ScheduleNotice: Identifiable {
     let id = UUID()
     let title: String
@@ -24,12 +26,19 @@ struct ScheduleNotice: Identifiable {
 /// 3. 自定义日程和自定义 DDL 的本地 CRUD
 /// 4. 与设置中心共享缓存后的自动刷新
 final class ScheduleViewModel: ObservableObject {
+    /// 当前选中的一级分栏。
     @Published var selectedSection: ScheduleSection = .courses
+    /// 当前账号的日程缓存快照。
     @Published private(set) var cache = ScheduleCache()
+    /// 是否正在做首次本地缓存恢复。
     @Published private(set) var isLoadingCache = true
+    /// 是否正在同步课表/考试。
     @Published private(set) var isSyncingCourses = false
+    /// 是否正在同步乐学 DDL。
     @Published private(set) var isSyncingDDL = false
+    /// 是否正在加载空教室元数据（校区/教学楼）。
     @Published private(set) var isLoadingClassroomMeta = false
+    /// 是否正在加载空教室结果。
     @Published private(set) var isLoadingClassrooms = false
     @Published private(set) var campuses: [CampusRecord] = []
     @Published private(set) var buildings: [BuildingRecord] = []
@@ -40,9 +49,12 @@ final class ScheduleViewModel: ObservableObject {
 
     private let service: ScheduleService
     private var hasLoaded = false
+    /// 当前教学楼最近一次拉下来的原始空教室记录。
     private var classroomRecords: [ClassroomRecord] = []
+    /// 监听设置和缓存变化，用于跨页面同步。
     private var cacheObserver: NSObjectProtocol?
 
+    /// 初始化日程状态机，并监听缓存变化通知。
     init(service: ScheduleService) {
         self.service = service
         cacheObserver = NotificationCenter.default.addObserver(
@@ -110,6 +122,8 @@ final class ScheduleViewModel: ObservableObject {
     }
 
     /// 首次进入日程页时从本地磁盘恢复缓存。
+    ///
+    /// 日程页优先展示本地缓存，而不是一上来就强制联网同步；这样冷启动更快，也更稳定。
     func loadIfNeeded() async {
         guard !hasLoaded else { return }
         hasLoaded = true
@@ -120,6 +134,8 @@ final class ScheduleViewModel: ObservableObject {
     }
 
     /// 同步课程表、考试安排和首周日期。
+    ///
+    /// 同步成功后会立刻更新本地缓存，从而驱动课表页、小组件和灵动岛一起刷新。
     func syncCourses() async {
         isSyncingCourses = true
         defer { isSyncingCourses = false }
@@ -158,6 +174,8 @@ final class ScheduleViewModel: ObservableObject {
     }
 
     /// 强制重新抓取乐学日历订阅地址。
+    ///
+    /// 主要用在订阅链接失效或用户主动要求重置时。
     func refreshLexueCalendarURL() async {
         isSyncingDDL = true
         defer { isSyncingDDL = false }
@@ -171,6 +189,8 @@ final class ScheduleViewModel: ObservableObject {
     }
 
     /// 切换某条 DDL 的完成状态。
+    ///
+    /// `done` 是纯本地状态，不会回写乐学网页端。
     func toggleDDLDone(_ event: DDLEventRecord) {
         guard let index = cache.ddlEvents.firstIndex(where: { $0.id == event.id }) else {
             return
@@ -187,6 +207,8 @@ final class ScheduleViewModel: ObservableObject {
     }
 
     /// 新增一条本地 DDL。
+    ///
+    /// 手动 DDL 与乐学同步项并存，但会用 `group` 字段区分来源。
     func addDDL(_ draft: DDLDraft) throws {
         guard !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "标题不能为空。"])
@@ -276,31 +298,39 @@ final class ScheduleViewModel: ObservableObject {
         persist()
     }
 
+    /// 设置是否显示课表网格分割线。
     func setShowDivider(_ value: Bool) {
         cache.showDivider = value
         persist()
     }
 
+    /// 设置是否显示当前时间线。
     func setShowCurrentTime(_ value: Bool) {
         cache.showCurrentTime = value
         persist()
     }
 
+    /// 设置是否在课表网格中显示考试块。
     func setShowExamInfo(_ value: Bool) {
         cache.showExamInfo = value
         persist()
     }
 
+    /// 设置是否启用课程提醒 Live Activity。
     func setShowCourseLiveActivityReminder(_ value: Bool) {
         cache.showCourseLiveActivityReminder = value
         persist()
     }
 
+    /// 设置灵动岛/锁屏提醒的提前显示阈值。
     func setCourseLiveActivityLeadMinutes(_ value: Int) {
         cache.courseLiveActivityLeadMinutes = min(max(value, 1), 99)
         persist()
     }
 
+    /// 从多行文本解析并替换整份时间表。
+    ///
+    /// 每行格式固定为 `开始时间,结束时间`；这里会同时校验顺序和重叠。
     func setTimeTable(from text: String) throws {
         let lines = text
             .split(whereSeparator: \.isNewline)
@@ -336,6 +366,7 @@ final class ScheduleViewModel: ObservableObject {
         persist()
     }
 
+    /// 把已有自定义日程转成编辑草稿；如果为空则生成一份默认草稿。
     func customScheduleDraft(for record: CustomScheduleRecord?) -> CustomScheduleDraft {
         guard let record else {
             let now = Date()
@@ -353,6 +384,7 @@ final class ScheduleViewModel: ObservableObject {
         )
     }
 
+    /// 新增一条自定义日程。
     func addCustomSchedule(_ draft: CustomScheduleDraft) throws {
         let beginMinutes = ScheduleDateCodec.minutesOfDay(from: draft.beginTime)
         let endMinutes = ScheduleDateCodec.minutesOfDay(from: draft.endTime)
@@ -374,6 +406,7 @@ final class ScheduleViewModel: ObservableObject {
         persist()
     }
 
+    /// 更新指定自定义日程。
     func updateCustomSchedule(id: String, draft: CustomScheduleDraft) throws {
         let beginMinutes = ScheduleDateCodec.minutesOfDay(from: draft.beginTime)
         let endMinutes = ScheduleDateCodec.minutesOfDay(from: draft.endTime)
@@ -391,14 +424,27 @@ final class ScheduleViewModel: ObservableObject {
         persist()
     }
 
+    /// 删除指定自定义日程。
     func deleteCustomSchedule(id: String) {
         cache.customSchedules.removeAll { $0.id == id }
         persist()
     }
 
+    /// 进入空教室页前的统一预热入口。
+    ///
+    /// 这里会做三件事：
+    /// 1. 按当前时间块重设节次筛选。
+    /// 2. 加载校区/教学楼元数据。
+    /// 3. 必要时刷新当前楼栋的空教室结果。
     func prepareClassroomIfNeeded() async {
+        applyCurrentClassroomSectionBlock()
+
         if campuses.isEmpty || buildings.isEmpty {
             await loadClassroomMeta()
+        }
+
+        if selectedBuildingID.isEmpty {
+            selectedBuildingID = cache.selectedBuildingID
         }
 
         if classroomRecords.isEmpty, !selectedBuildingID.isEmpty {
@@ -406,12 +452,14 @@ final class ScheduleViewModel: ObservableObject {
         }
     }
 
+    /// 切换空教室查询校区。
     func selectCampus(code: String) async {
         guard code != cache.selectedCampusCode else { return }
 
         cache.selectedCampusCode = code
         cache.selectedCampusName = campuses.first(where: { $0.code == code })?.name ?? ""
         selectedBuildingID = ""
+        cache.selectedBuildingID = ""
         buildings = []
         classroomRecords = []
         classroomAvailabilities = []
@@ -423,20 +471,27 @@ final class ScheduleViewModel: ObservableObject {
         }
     }
 
+    /// 切换当前教学楼并刷新空教室结果。
     func selectBuilding(id: String) async {
         guard id != selectedBuildingID else { return }
         selectedBuildingID = id
+        cache.selectedBuildingID = id
         classroomRecords = []
         classroomAvailabilities = []
+        persist()
         await refreshClassrooms()
     }
 
+    /// 更新空教室节次筛选结果。
     func setSelectedClassroomSectionIDs(_ values: [Int]) {
         cache.selectedClassroomSectionIDs = normalizeSelectedClassroomSectionIDs(values)
         persist()
         refreshClassroomAvailabilities()
     }
 
+    /// 刷新当前教学楼的空教室状态。
+    ///
+    /// 如果当前学期编码还未知，会先补查学期，再请求教室占用。
     func refreshClassrooms() async {
         if cache.currentTerm.isEmpty {
             do {
@@ -475,10 +530,12 @@ final class ScheduleViewModel: ObservableObject {
         await refreshClassrooms()
     }
 
+    /// DDL 到期时间文案。
     func ddlDueText(for event: DDLEventRecord) -> String {
         ScheduleDateCodec.formatRelativeDateTime(event.dueAt)
     }
 
+    /// DDL 剩余/超时文案。
     func ddlRemainingText(for event: DDLEventRecord) -> String {
         let minutes = Int(event.dueAt.timeIntervalSinceNow / 60)
         let absolute = abs(minutes)
@@ -498,6 +555,9 @@ final class ScheduleViewModel: ObservableObject {
         return minutes < 0 ? "已过 \(body)" : "剩余 \(body)"
     }
 
+    /// DDL 颜色语义。
+    ///
+    /// 这里返回字符串而不是 `Color`，是为了让 View 层自己决定具体颜色映射。
     func ddlTint(for event: DDLEventRecord) -> String {
         if event.done {
             return "gray"
@@ -515,6 +575,7 @@ final class ScheduleViewModel: ObservableObject {
         return "green"
     }
 
+    /// 加载空教室所需的校区和教学楼元数据。
     private func loadClassroomMeta() async {
         isLoadingClassroomMeta = true
         defer { isLoadingClassroomMeta = false }
@@ -523,8 +584,13 @@ final class ScheduleViewModel: ObservableObject {
             campuses = try await service.fetchCampuses()
 
             if cache.selectedCampusCode.isEmpty {
-                cache.selectedCampusCode = campuses.first?.code ?? ""
-                cache.selectedCampusName = campuses.first?.name ?? ""
+                if let preferredCampus = preferredCampus(from: campuses) {
+                    cache.selectedCampusCode = preferredCampus.code
+                    cache.selectedCampusName = preferredCampus.name
+                } else {
+                    cache.selectedCampusCode = campuses.first?.code ?? ""
+                    cache.selectedCampusName = campuses.first?.name ?? ""
+                }
                 persist()
             }
 
@@ -535,18 +601,30 @@ final class ScheduleViewModel: ObservableObject {
         }
     }
 
+    /// 根据当前校区加载教学楼，并优先精确匹配“最近下一节课”的楼宇。
     private func loadBuildings() async {
         do {
             buildings = try await service.fetchBuildings(campusCode: cache.selectedCampusCode)
-            if selectedBuildingID.isEmpty {
+            let validBuildingIDs = Set(buildings.map(\.buildingCode))
+            let cachedBuildingID = cache.selectedBuildingID
+            let preferredBuildingID = preferredBuildingID(from: buildings)
+
+            if let preferredBuildingID, validBuildingIDs.contains(preferredBuildingID) {
+                selectedBuildingID = preferredBuildingID
+            } else if validBuildingIDs.contains(cachedBuildingID) {
+                selectedBuildingID = cachedBuildingID
+            } else {
                 selectedBuildingID = buildings.first?.buildingCode ?? ""
             }
+            cache.selectedBuildingID = selectedBuildingID
+            persist()
         } catch {
             if isCancellation(error) { return }
             notice = ScheduleNotice(title: "教学楼同步失败", message: error.localizedDescription)
         }
     }
 
+    /// 把原始教室占用记录格式化成可直接展示的空教室列表。
     private func refreshClassroomAvailabilities() {
         let nowMinutes = currentMinutes()
         let selectedSections = normalizeSelectedClassroomSectionIDs(cache.selectedClassroomSectionIDs)
@@ -582,6 +660,7 @@ final class ScheduleViewModel: ObservableObject {
             }
     }
 
+    /// 构造单间教室的当前空闲状态描述。
     private func buildClassroomAvailability(
         record: ClassroomRecord,
         nowMinutes: Int
@@ -636,6 +715,7 @@ final class ScheduleViewModel: ObservableObject {
         )
     }
 
+    /// 节次筛选摘要文本。
     var classroomSectionFilterSummary: String {
         let selected = normalizeSelectedClassroomSectionIDs(cache.selectedClassroomSectionIDs)
         if selected.isEmpty {
@@ -644,10 +724,12 @@ final class ScheduleViewModel: ObservableObject {
         return prettySectionsString(selected)
     }
 
+    /// 当前是否处于“当前空闲”模式。
     var isCurrentFreeClassroomMode: Bool {
         normalizeSelectedClassroomSectionIDs(cache.selectedClassroomSectionIDs).isEmpty
     }
 
+    /// 计算某间教室与当前筛选节次的命中摘要。
     func classroomMatchedSectionsText(for availability: ClassroomAvailability) -> String {
         let selected = normalizeSelectedClassroomSectionIDs(cache.selectedClassroomSectionIDs)
         guard !selected.isEmpty else { return "" }
@@ -656,6 +738,7 @@ final class ScheduleViewModel: ObservableObject {
         return prettySectionsString(matched)
     }
 
+    /// 查询某间教室在指定时刻之后的最近空闲起点。
     private func nextFreeStartMinutes(from record: ClassroomRecord, after minutes: Int) -> Int? {
         let busySet = Set(record.busyTimeCodes)
 
@@ -673,6 +756,7 @@ final class ScheduleViewModel: ObservableObject {
         return nil
     }
 
+    /// 把一组节次压缩成更适合展示的区间文本。
     private func prettySectionsString(_ sections: [Int]) -> String {
         guard !sections.isEmpty else {
             return "无"
@@ -697,6 +781,7 @@ final class ScheduleViewModel: ObservableObject {
         .joined(separator: ", ")
     }
 
+    /// 把时长秒数格式化成中文短文案。
     private func formatDuration(seconds: Int) -> String {
         let positive = max(seconds, 0)
         if positive < 60 {
@@ -716,6 +801,7 @@ final class ScheduleViewModel: ObservableObject {
         return "\(hours) 小时 \(minutes) 分钟"
     }
 
+    /// 根据首周日期推导当前周次。
     private func resolvedCurrentWeek() -> Int {
         guard let firstDay = cache.firstDay else {
             return 1
@@ -727,11 +813,13 @@ final class ScheduleViewModel: ObservableObject {
         return max(diff / 7 + 1, 1)
     }
 
+    /// 当前时间在一天中的分钟偏移。
     private func currentMinutes() -> Int {
         let components = Calendar.current.dateComponents([.hour, .minute], from: Date())
         return (components.hour ?? 0) * 60 + (components.minute ?? 0)
     }
 
+    /// 去重并裁剪节次筛选结果，只保留合法节次。
     private func normalizeSelectedClassroomSectionIDs(_ values: [Int]) -> [Int] {
         let validSectionIDs = Set(cache.timeTable.map(\.id))
         var unique: [Int] = []
@@ -747,6 +835,7 @@ final class ScheduleViewModel: ObservableObject {
         return unique.sorted()
     }
 
+    /// 统一兼容任务取消错误。
     private func isCancellation(_ error: Error) -> Bool {
         if error is CancellationError {
             return true
@@ -756,15 +845,180 @@ final class ScheduleViewModel: ObservableObject {
         return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
     }
 
+    /// 从磁盘重新加载缓存，并同步周次与当前教学楼。
     private func reloadFromDisk() {
         cache = ScheduleCacheStore.load()
         selectedWeek = min(max(resolvedCurrentWeek(), 1), maxWeek)
-        if selectedBuildingID.isEmpty {
-            selectedBuildingID = buildings.first?.buildingCode ?? selectedBuildingID
+        selectedBuildingID = cache.selectedBuildingID
+    }
+
+    /// 写回缓存。
+    private func persist() {
+        ScheduleCacheStore.save(cache)
+    }
+
+    /// 从“最近下一节课”的教室名推导最匹配的教学楼。
+    ///
+    /// 规则是：永远先做精确匹配，精确失败后才退回前缀匹配，再不行才回退缓存。
+    private func preferredBuildingID(from buildings: [BuildingRecord]) -> String? {
+        guard let course = nextUpcomingCourse() else { return nil }
+        let candidates = buildingMatchCandidates(from: course.classroom)
+        guard !candidates.isEmpty else { return nil }
+
+        let normalizedBuildings = buildings.map { ($0, normalizeBuildingMatchText($0.name)) }
+
+        if let exact = normalizedBuildings.first(where: { pair in
+            candidates.contains(pair.1)
+        }) {
+            return exact.0.buildingCode
+        }
+
+        return normalizedBuildings.first { pair in
+            let buildingName = pair.1
+            guard !buildingName.isEmpty else { return false }
+            return candidates.contains { candidate in
+                candidate.hasPrefix(buildingName) || buildingName.hasPrefix(candidate)
+            }
+        }?.0.buildingCode
+    }
+
+    /// 从“最近下一节课”的校区信息推导默认校区。
+    private func preferredCampus(from campuses: [CampusRecord]) -> CampusRecord? {
+        guard let course = nextUpcomingCourse() else { return nil }
+        let normalizedCampus = normalizeBuildingMatchText(course.campus)
+        guard !normalizedCampus.isEmpty else { return nil }
+
+        return campuses.first { campus in
+            let campusName = normalizeBuildingMatchText(campus.name)
+            let campusCode = normalizeBuildingMatchText(campus.code)
+            return normalizedCampus.contains(campusName) || campusName.contains(normalizedCampus) || normalizedCampus == campusCode
         }
     }
 
-    private func persist() {
-        ScheduleCacheStore.save(cache)
+    /// 找出当前时间之后最近开始的一节正式课程。
+    private func nextUpcomingCourse() -> CourseRecord? {
+        guard let firstDay = cache.firstDay else { return nil }
+        let slotMap = Dictionary(uniqueKeysWithValues: cache.timeTable.map { ($0.id, $0) })
+        let now = Date()
+
+        return cache.courses
+            .compactMap { course -> (CourseRecord, Date)? in
+                let nextStart = course.weeks.compactMap { week -> Date? in
+                    guard
+                        let slot = slotMap[course.startSection],
+                        let startDate = combineCourseDate(
+                            firstDay: firstDay,
+                            week: week,
+                            weekday: course.weekday,
+                            time: slot.start
+                        )
+                    else {
+                        return nil
+                    }
+                    return startDate >= now ? startDate : nil
+                }.min()
+
+                guard let nextStart else { return nil }
+                return (course, nextStart)
+            }
+            .min { lhs, rhs in lhs.1 < rhs.1 }?
+            .0
+    }
+
+    /// 把课程的教学周/星期/节次时间拼成真实日期时间。
+    private func combineCourseDate(firstDay: Date, week: Int, weekday: Int, time: String) -> Date? {
+        let dayOffset = (week - 1) * 7 + (weekday - 1)
+        guard let day = Calendar.current.date(byAdding: .day, value: dayOffset, to: firstDay) else {
+            return nil
+        }
+
+        let parts = time.split(separator: ":")
+        guard parts.count == 2, let hour = Int(parts[0]), let minute = Int(parts[1]) else {
+            return nil
+        }
+
+        var components = Calendar.current.dateComponents([.year, .month, .day], from: day)
+        components.hour = hour
+        components.minute = minute
+        components.second = 0
+        return Calendar.current.date(from: components)
+    }
+
+    /// 归一化楼宇名称，提升“综教A101 -> 综教A”这类匹配成功率。
+    private func normalizeBuildingMatchText(_ value: String) -> String {
+        let compact = value
+            .uppercased()
+            .replacingOccurrences(of: "理教楼", with: "理教")
+            .replacingOccurrences(of: "文萃楼", with: "文萃")
+            .replacingOccurrences(of: "教学楼", with: "")
+            .replacingOccurrences(of: "楼", with: "")
+            .unicodeScalars
+            .filter { scalar in
+                !CharacterSet.whitespacesAndNewlines.contains(scalar) &&
+                !CharacterSet.punctuationCharacters.contains(scalar) &&
+                !CharacterSet.symbols.contains(scalar)
+            }
+
+        return String(String.UnicodeScalarView(compact))
+    }
+
+    /// 从完整教室名中推导一组可能的楼宇候选值。
+    private func buildingMatchCandidates(from classroom: String) -> [String] {
+        let normalized = normalizeBuildingMatchText(classroom)
+        guard !normalized.isEmpty else { return [] }
+
+        var candidates: [String] = [normalized]
+
+        if let firstDigitIndex = normalized.firstIndex(where: { $0.isNumber }) {
+            let prefix = String(normalized[..<firstDigitIndex])
+            if !prefix.isEmpty {
+                candidates.append(prefix)
+            }
+        }
+
+        return Array(NSOrderedSet(array: candidates)) as? [String] ?? candidates
+    }
+
+    /// 按当前时间自动切换到对应的节次块筛选。
+    ///
+    /// 不是首次才做，而是每次进入空教室页都会重新计算。
+    private func applyCurrentClassroomSectionBlock() {
+        let sectionIDs = currentClassroomSectionBlockIDs()
+        guard !sectionIDs.isEmpty else { return }
+
+        let normalized = normalizeSelectedClassroomSectionIDs(sectionIDs)
+        guard cache.selectedClassroomSectionIDs != normalized else { return }
+        cache.selectedClassroomSectionIDs = normalized
+        persist()
+        if !classroomRecords.isEmpty {
+            refreshClassroomAvailabilities()
+        }
+    }
+
+    /// 计算当前时间所在的学校节次块：
+    /// 1-2 / 3-5 / 6-7 / 8-10 / 11-13。
+    private func currentClassroomSectionBlockIDs() -> [Int] {
+        let now = currentMinutes()
+
+        let activeSlotID = cache.timeTable.first(where: { slot in
+            slot.startMinutes <= now && now < slot.endMinutes
+        })?.id ?? cache.timeTable.first(where: { $0.startMinutes > now })?.id
+
+        guard let activeSlotID else { return [] }
+
+        switch activeSlotID {
+        case 1, 2:
+            return [1, 2]
+        case 3, 4, 5:
+            return [3, 4, 5]
+        case 6, 7:
+            return [6, 7]
+        case 8, 9, 10:
+            return [8, 9, 10]
+        case 11, 12, 13:
+            return [11, 12, 13]
+        default:
+            return [activeSlotID]
+        }
     }
 }
