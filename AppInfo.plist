@@ -45,6 +45,8 @@
 	<string>BIT101 需要使用你的定位，以便在地图中显示你当前所在位置。</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
