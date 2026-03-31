@@ -523,7 +523,7 @@ struct BIT101APIClient {
             var request = URLRequest(url: nextURL)
             request.httpMethod = "GET"
 
-            let (data, response) = try await sendRequest(request, followRedirects: false)
+            let (_, response) = try await sendRequest(request, followRedirects: false)
 
             if (300 ..< 400).contains(response.statusCode),
                let nextLocation = response.value(forHTTPHeaderField: "Location"),

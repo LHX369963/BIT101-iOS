@@ -121,7 +121,7 @@ enum ScheduleReminderBackgroundRefresh {
     /// 一旦系统真的唤醒 app，这里就重新跑一遍提醒计算，并预排下一次后台刷新。
     private static func handle(task: BGAppRefreshTask) {
         let operation = Task {
-            let nextBeginDate = await ScheduleLiveActivityManager.shared.preferredBackgroundRefreshBeginDate()
+            let nextBeginDate = ScheduleLiveActivityManager.shared.preferredBackgroundRefreshBeginDate()
             schedule(earliestBeginDate: nextBeginDate)
             await ScheduleLiveActivityManager.shared.refreshFromCurrentCache(trigger: "bg_app_refresh")
             task.setTaskCompleted(success: true)
@@ -154,7 +154,7 @@ struct BIT101_iOSApp: App {
         }
 
         Task {
-            let nextBeginDate = await ScheduleLiveActivityManager.shared.preferredBackgroundRefreshBeginDate()
+            let nextBeginDate = ScheduleLiveActivityManager.shared.preferredBackgroundRefreshBeginDate()
             ScheduleReminderBackgroundRefresh.schedule(earliestBeginDate: nextBeginDate)
 
             // 退出登录或登录失效后，直接结束现有提醒，避免旧 activity 继续挂在灵动岛上。
