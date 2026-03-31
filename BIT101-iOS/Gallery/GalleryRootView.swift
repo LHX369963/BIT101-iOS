@@ -8,6 +8,23 @@
 import SwiftUI
 import UIKit
 
+/// 统一生成“左右轻扫切换分区”的横向手势。
+///
+/// 话廊 feed 和消息分类都使用同一套判断条件：
+/// - 横向位移大于纵向位移
+/// - 横向位移达到最小触发阈值
+/// - 左滑记作 `+1`，右滑记作 `-1`
+private func makeHorizontalSwitchGesture(onStep: @escaping (Int) -> Void) -> some Gesture {
+    DragGesture(minimumDistance: 24, coordinateSpace: .local)
+        .onEnded { value in
+            let horizontal = value.translation.width
+            let vertical = value.translation.height
+
+            guard abs(horizontal) > abs(vertical), abs(horizontal) >= 56 else { return }
+            onStep(horizontal < 0 ? 1 : -1)
+        }
+}
+
 // MARK: - Gallery Root
 
 /// 话廊页根视图。
@@ -136,19 +153,7 @@ struct GalleryRootView: View {
     /// 这里没有使用系统 pager，而是保留当前“底部全覆盖 + 顶部 segmented”的布局，
     /// 通过横向拖拽手势做轻量切换。
     private var feedSwitchGesture: some Gesture {
-        DragGesture(minimumDistance: 24, coordinateSpace: .local)
-            .onEnded { value in
-                let horizontal = value.translation.width
-                let vertical = value.translation.height
-
-                guard abs(horizontal) > abs(vertical), abs(horizontal) >= 56 else { return }
-
-                if horizontal < 0 {
-                    switchFeed(step: 1)
-                } else {
-                    switchFeed(step: -1)
-                }
-            }
+        makeHorizontalSwitchGesture(onStep: switchFeed)
     }
 
     /// 把当前 feed 切换到相邻分区。
@@ -442,30 +447,7 @@ private struct GalleryFeedView: View {
 
     /// 应用“举报并隐藏 / 举报并屏蔽用户”的本地治理动作，再异步上报。
     private func applyReport(_ context: GalleryReportContext, type: CommunityReportType, note: String) {
-        switch context.action {
-        case .hidePoster:
-            settings.hidePoster(
-                id: context.poster.id,
-                title: context.poster.title,
-                userID: context.poster.user.id,
-                userNickname: context.poster.user.nickname,
-                createdTime: context.poster.createTime
-            )
-        case .blockUser:
-            if context.poster.anonymous || context.poster.user.id == -1 {
-                if settings.galleryHiddenUserIDs.first != -1 {
-                    settings.toggleHideAnonymous()
-                }
-            } else {
-                var hiddenUserIDs = settings.galleryHiddenUserIDs
-                if !hiddenUserIDs.contains(context.poster.user.id) {
-                    hiddenUserIDs.append(context.poster.user.id)
-                    settings.updateGallerySettings(hiddenUserIDs: hiddenUserIDs)
-                }
-            }
-        }
-
-        reportService.submitReport(for: context.poster, type: type, note: note, action: context.action)
+        applyGalleryModerationAction(context, type: type, note: note, settings: settings, reportService: reportService)
     }
 }
 
@@ -919,7 +901,12 @@ struct GalleryPosterDetailView: View {
                 dismissButton: .default(Text("知道了"))
             )
         }
-        .confirmationDialog("删除帖子", isPresented: $isShowingDeleteConfirmation, titleVisibility: .visible) {
+        .alert(
+            "删除帖子",
+            isPresented: $isShowingDeleteConfirmation,
+            presenting: viewModel.poster
+        ) { _ in
+            Button("取消", role: .cancel) {}
             Button("删除", role: .destructive) {
                 Task {
                     if await viewModel.deletePoster() {
@@ -928,8 +915,8 @@ struct GalleryPosterDetailView: View {
                     }
                 }
             }
-        } message: {
-            Text("删除后无法恢复。")
+        } message: { poster in
+            Text("确定删除“\(poster.title.isEmpty ? "未命名帖子" : poster.title)”吗？删除后无法恢复。")
         }
     }
 
@@ -968,30 +955,7 @@ struct GalleryPosterDetailView: View {
 
     /// 在详情页里应用举报动作。
     private func applyReport(_ context: GalleryReportContext, type: CommunityReportType, note: String) {
-        switch context.action {
-        case .hidePoster:
-            settings.hidePoster(
-                id: context.poster.id,
-                title: context.poster.title,
-                userID: context.poster.user.id,
-                userNickname: context.poster.user.nickname,
-                createdTime: context.poster.createTime
-            )
-        case .blockUser:
-            if context.poster.anonymous || context.poster.user.id == -1 {
-                if settings.galleryHiddenUserIDs.first != -1 {
-                    settings.toggleHideAnonymous()
-                }
-            } else {
-                var hiddenUserIDs = settings.galleryHiddenUserIDs
-                if !hiddenUserIDs.contains(context.poster.user.id) {
-                    hiddenUserIDs.append(context.poster.user.id)
-                    settings.updateGallerySettings(hiddenUserIDs: hiddenUserIDs)
-                }
-            }
-        }
-
-        reportService.submitReport(for: context.poster, type: type, note: note, action: context.action)
+        applyGalleryModerationAction(context, type: type, note: note, settings: settings, reportService: reportService)
     }
 }
 
@@ -1535,19 +1499,7 @@ private struct GalleryMessagesView: View {
 
     /// 消息分类左右切换手势。
     private var messageSwitchGesture: some Gesture {
-        DragGesture(minimumDistance: 24, coordinateSpace: .local)
-            .onEnded { value in
-                let horizontal = value.translation.width
-                let vertical = value.translation.height
-
-                guard abs(horizontal) > abs(vertical), abs(horizontal) >= 56 else { return }
-
-                if horizontal < 0 {
-                    switchType(step: 1)
-                } else {
-                    switchType(step: -1)
-                }
-            }
+        makeHorizontalSwitchGesture(onStep: switchType)
     }
 
     /// 顶部分段标题；有未读时在标题右侧追加计数。
@@ -1699,6 +1651,42 @@ private struct GalleryReportContext: Identifiable {
     var id: String {
         "\(action.rawValue)-\(poster.id)"
     }
+}
+
+/// 统一执行“举报后本地先隐藏 / 屏蔽”的治理动作。
+///
+/// 信息流和帖子详情页的本地治理副作用完全相同，因此集中到同一处，避免两边各自维护一套分支。
+private func applyGalleryModerationAction(
+    _ context: GalleryReportContext,
+    type: CommunityReportType,
+    note: String,
+    settings: AppSettingsStore,
+    reportService: CommunityReportService
+) {
+    switch context.action {
+    case .hidePoster:
+        settings.hidePoster(
+            id: context.poster.id,
+            title: context.poster.title,
+            userID: context.poster.user.id,
+            userNickname: context.poster.user.nickname,
+            createdTime: context.poster.createTime
+        )
+    case .blockUser:
+        if context.poster.anonymous || context.poster.user.id == -1 {
+            if settings.galleryHiddenUserIDs.first != -1 {
+                settings.toggleHideAnonymous()
+            }
+        } else {
+            var hiddenUserIDs = settings.galleryHiddenUserIDs
+            if !hiddenUserIDs.contains(context.poster.user.id) {
+                hiddenUserIDs.append(context.poster.user.id)
+                settings.updateGallerySettings(hiddenUserIDs: hiddenUserIDs)
+            }
+        }
+    }
+
+    reportService.submitReport(for: context.poster, type: type, note: note, action: context.action)
 }
 
 /// 帖子卡片右上角的更多操作菜单。

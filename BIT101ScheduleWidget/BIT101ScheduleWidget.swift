@@ -571,7 +571,7 @@ private struct ScheduleWidgetEntryView: View {
         VStack(alignment: .leading, spacing: 6) {
             if let first = entry.nextOccurrences.first {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(first.isCurrent ? "正在上" : "下一节")
+                    Text(first.isCurrent ? "正在上课" : "下一节")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -615,7 +615,7 @@ private struct ScheduleWidgetEntryView: View {
             if let first = entry.nextOccurrences.first {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(first.isCurrent ? "正在上" : "下一节")
+                        Text(first.isCurrent ? "正在上课" : "下一节")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
 
@@ -647,7 +647,7 @@ private struct ScheduleWidgetEntryView: View {
     private var accessoryInlineBody: some View {
         Group {
             if let first = entry.nextOccurrences.first {
-                Text("\(first.isCurrent ? "正在上" : "下一节") \(first.title)")
+                Text("\(first.isCurrent ? "正在上课" : "下一节") \(first.title)")
                     .lineLimit(1)
             } else {
                 Text(accessoryEmptyText)
@@ -687,7 +687,7 @@ private struct ScheduleWidgetEntryView: View {
             if let first = entry.nextOccurrences.first {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(first.isCurrent ? "正在上" : "下一节")
+                        Text(first.isCurrent ? "正在上课" : "下一节")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
@@ -751,7 +751,7 @@ private struct ScheduleWidgetEntryView: View {
             if let first = entry.nextOccurrences.first {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(first.isCurrent ? "正在上" : "下一节")
+                        Text(first.isCurrent ? "正在上课" : "下一节")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 

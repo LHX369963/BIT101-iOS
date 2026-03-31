@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import BackgroundTasks
 import UIKit
 
 /// 统一管理应用允许的方向集合。
@@ -51,6 +52,14 @@ enum AppOrientationController {
 
 /// 让 UIKit 在需要时回调当前允许的方向集合。
 final class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        ScheduleReminderBackgroundRefresh.register()
+        return true
+    }
+
     /// 提供应用级的方向策略。
     ///
     /// SwiftUI App 生命周期下，大部分 UI 都由 SwiftUI 管，但方向能力的最终仲裁
@@ -61,6 +70,66 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         supportedInterfaceOrientationsFor window: UIWindow?
     ) -> UIInterfaceOrientationMask {
         AppOrientationController.currentMask()
+    }
+}
+
+/// 课前提醒的后台刷新协调器。
+///
+/// 这条链路只是 best-effort：
+/// - 由系统决定实际什么时候唤醒 app
+/// - 唤醒后重新执行一遍日程提醒计算，尽量让灵动岛在后台也有机会启动
+/// - 同时重新提交下一次刷新请求，维持后续链路
+enum ScheduleReminderBackgroundRefresh {
+    /// 后台刷新任务标识。
+    ///
+    /// 与 Info.plist 中的 `BGTaskSchedulerPermittedIdentifiers` 保持同源，避免切换 bundle id
+    /// 或调试/正式包共存时出现 identifier 不一致。
+    static var identifier: String {
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "BIT101-dev.BIT101-iOS"
+        return "\(bundleIdentifier).schedule-refresh"
+    }
+
+    /// 在应用启动阶段注册后台刷新任务。
+    ///
+    /// Apple 要求所有 BGTask 都必须在启动序列结束前注册；因此这里放在
+    /// `UIApplicationDelegate` 的 `didFinishLaunching` 里最稳妥。
+    static func register() {
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil) { task in
+            guard let refreshTask = task as? BGAppRefreshTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            handle(task: refreshTask)
+        }
+    }
+
+    /// 根据下一次课前提醒边界，提交一条后台刷新请求。
+    ///
+    /// 重新提交同一 identifier 的请求时，系统会用新的请求替换旧请求。
+    static func schedule(earliestBeginDate: Date?) {
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
+        guard let earliestBeginDate else { return }
+
+        let request = BGAppRefreshTaskRequest(identifier: identifier)
+        request.earliestBeginDate = earliestBeginDate
+
+        try? BGTaskScheduler.shared.submit(request)
+    }
+
+    /// 后台刷新任务入口。
+    ///
+    /// 一旦系统真的唤醒 app，这里就重新跑一遍提醒计算，并预排下一次后台刷新。
+    private static func handle(task: BGAppRefreshTask) {
+        let operation = Task {
+            let nextBeginDate = await ScheduleLiveActivityManager.shared.preferredBackgroundRefreshBeginDate()
+            schedule(earliestBeginDate: nextBeginDate)
+            await ScheduleLiveActivityManager.shared.refreshFromCurrentCache(trigger: "bg_app_refresh")
+            task.setTaskCompleted(success: true)
+        }
+
+        task.expirationHandler = {
+            operation.cancel()
+        }
     }
 }
 
@@ -85,6 +154,9 @@ struct BIT101_iOSApp: App {
         }
 
         Task {
+            let nextBeginDate = await ScheduleLiveActivityManager.shared.preferredBackgroundRefreshBeginDate()
+            ScheduleReminderBackgroundRefresh.schedule(earliestBeginDate: nextBeginDate)
+
             // 退出登录或登录失效后，直接结束现有提醒，避免旧 activity 继续挂在灵动岛上。
             let fakeCookie = LoginStorage.shared.fakeCookie.trimmingCharacters(in: .whitespacesAndNewlines)
             if fakeCookie.isEmpty {

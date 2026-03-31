@@ -8,6 +8,14 @@
 import Combine
 import Foundation
 
+private extension Int {
+    func modulo(_ count: Int) -> Int {
+        guard count > 0 else { return 0 }
+        let remainder = self % count
+        return remainder >= 0 ? remainder : remainder + count
+    }
+}
+
 /// 日程页统一使用的提示模型。
 ///
 /// 日程模块内部的同步、保存、空教室查询等动作都会通过这个统一提示模型把错误抛给视图层。
@@ -26,6 +34,29 @@ struct ScheduleNotice: Identifiable {
 /// 3. 自定义日程和自定义 DDL 的本地 CRUD
 /// 4. 与设置中心共享缓存后的自动刷新
 final class ScheduleViewModel: ObservableObject {
+    /// 课表页当前正在显示的课表分身。
+    ///
+    /// 主课表仍然来自当前账号缓存；导入的课表则作为只读分身挂在后面，供上下滑循环切换。
+    struct CourseScheduleVariant: Identifiable, Equatable {
+        let id: String
+        let title: String
+        let isPrimary: Bool
+        let currentTerm: String
+        let firstDayString: String
+        let timeTable: [TimeSlot]
+        let courses: [CourseRecord]
+        let exams: [ExamRecord]
+        let customSchedules: [CustomScheduleRecord]
+
+        var firstDay: Date? {
+            ScheduleDateCodec.parseDate(firstDayString)
+        }
+
+        var hasCourseData: Bool {
+            !courses.isEmpty || !exams.isEmpty
+        }
+    }
+
     /// 当前选中的一级分栏。
     @Published var selectedSection: ScheduleSection = .courses
     /// 当前账号的日程缓存快照。
@@ -44,6 +75,7 @@ final class ScheduleViewModel: ObservableObject {
     @Published private(set) var buildings: [BuildingRecord] = []
     @Published private(set) var classroomAvailabilities: [ClassroomAvailability] = []
     @Published var selectedWeek = 1
+    @Published var selectedCourseScheduleIndex = 0
     @Published var selectedBuildingID = ""
     @Published var notice: ScheduleNotice?
 
@@ -80,6 +112,18 @@ final class ScheduleViewModel: ObservableObject {
         }
     }
 
+    /// 构造日程模块统一使用的本地校验错误。
+    ///
+    /// 这类错误都属于“用户输入不合法”或“本地配置格式不正确”，
+    /// 不需要为每个分支再重复写一遍相同的 domain / code。
+    private func scheduleValidationError(_ message: String) -> NSError {
+        NSError(
+            domain: "BIT101.Schedule",
+            code: -1,
+            userInfo: [NSLocalizedDescriptionKey: message]
+        )
+    }
+
     /// DDL 列表默认向前展示的天数。
     var beforeDay: Int { cache.ddlBeforeDay }
     /// DDL 列表默认向后保留的天数。
@@ -87,20 +131,79 @@ final class ScheduleViewModel: ObservableObject {
 
     /// 首周日期的展示文本。
     var firstDayDescription: String {
-        guard let firstDay = cache.firstDay else {
+        guard let firstDay = activeCourseSchedule.firstDay else {
             return "未同步"
         }
         return ScheduleDateCodec.formatDate(firstDay)
     }
 
+    /// 当前显示课表的标题。
+    var activeCourseScheduleTitle: String {
+        activeCourseSchedule.title
+    }
+
     /// 当前学期最大周数，至少覆盖当前周。
     var maxWeek: Int {
-        max(cache.courses.flatMap(\.weeks).max() ?? 1, resolvedCurrentWeek())
+        max(activeCourseSchedule.courses.flatMap(\.weeks).max() ?? 1, resolvedCurrentWeek())
     }
 
     /// 是否已经同步到任何课程或考试数据。
     var hasCourseData: Bool {
-        !cache.courses.isEmpty || !cache.exams.isEmpty
+        activeCourseSchedule.hasCourseData
+    }
+
+    /// 所有可切换的课表列表。
+    ///
+    /// 顺序固定为：我的课表在前，导入的分享课表依次排在后面。
+    var courseSchedules: [CourseScheduleVariant] {
+        let primary = CourseScheduleVariant(
+            id: "__primary__",
+            title: cache.primaryScheduleTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "课表" : cache.primaryScheduleTitle,
+            isPrimary: true,
+            currentTerm: cache.currentTerm,
+            firstDayString: cache.firstDayString,
+            timeTable: cache.timeTable,
+            courses: cache.courses,
+            exams: cache.exams,
+            customSchedules: cache.customSchedules
+        )
+
+        let shared = cache.sharedSchedules.map { record in
+            CourseScheduleVariant(
+                id: record.id,
+                title: record.title,
+                isPrimary: false,
+                currentTerm: record.currentTerm,
+                firstDayString: record.firstDayString,
+                timeTable: record.timeTable,
+                courses: record.courses,
+                exams: [],
+                customSchedules: []
+            )
+        }
+
+        return [primary] + shared
+    }
+
+    /// 当前正在展示的那一份课表。
+    var activeCourseSchedule: CourseScheduleVariant {
+        let variants = courseSchedules
+        guard !variants.isEmpty else {
+            return CourseScheduleVariant(
+                id: "__primary__",
+                title: "我的课表",
+                isPrimary: true,
+                currentTerm: "",
+                firstDayString: "",
+                timeTable: cache.timeTable,
+                courses: [],
+                exams: [],
+                customSchedules: []
+            )
+        }
+
+        let normalizedIndex = min(max(selectedCourseScheduleIndex, 0), variants.count - 1)
+        return variants[normalizedIndex]
     }
 
     /// 是否已经拿到乐学订阅地址。
@@ -211,7 +314,7 @@ final class ScheduleViewModel: ObservableObject {
     /// 手动 DDL 与乐学同步项并存，但会用 `group` 字段区分来源。
     func addDDL(_ draft: DDLDraft) throws {
         guard !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "标题不能为空。"])
+            throw scheduleValidationError("标题不能为空。")
         }
 
         cache.ddlEvents.append(
@@ -231,7 +334,7 @@ final class ScheduleViewModel: ObservableObject {
     /// 更新一条已有的本地 DDL。
     func updateDDL(id: String, draft: DDLDraft) throws {
         guard !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "标题不能为空。"])
+            throw scheduleValidationError("标题不能为空。")
         }
         guard let index = cache.ddlEvents.firstIndex(where: { $0.id == id }) else { return }
 
@@ -272,6 +375,53 @@ final class ScheduleViewModel: ObservableObject {
     /// 把周次快速重置到当前周。
     func resetToCurrentWeek() {
         selectedWeek = min(max(resolvedCurrentWeek(), 1), maxWeek)
+    }
+
+    /// 在“我的课表”和导入课表之间循环切换。
+    ///
+    /// 这里故意做成 loop 语义：无论向上还是向下滑，到边界后都回卷。
+    func cycleCourseSchedule(step: Int) {
+        let variants = courseSchedules
+        guard variants.count > 1 else { return }
+
+        let count = variants.count
+        let nextIndex = (selectedCourseScheduleIndex + step).modulo(count)
+        selectedCourseScheduleIndex = nextIndex
+        selectedWeek = min(max(selectedWeek, 1), maxWeek)
+    }
+
+    /// 重命名当前账号自己的课表。
+    func renamePrimarySchedule(to title: String) throws {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw scheduleValidationError("课表名称不能为空。")
+        }
+        guard trimmed.count <= scheduleNameCharacterLimit else {
+            throw scheduleValidationError("课表名称最多 8 个字符。")
+        }
+        cache.primaryScheduleTitle = trimmed
+        persist()
+    }
+
+    /// 重命名一份导入的分享课表。
+    func renameSharedSchedule(id: String, to title: String) throws {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw scheduleValidationError("课表名称不能为空。")
+        }
+        guard trimmed.count <= scheduleNameCharacterLimit else {
+            throw scheduleValidationError("课表名称最多 8 个字符。")
+        }
+        guard let index = cache.sharedSchedules.firstIndex(where: { $0.id == id }) else { return }
+        cache.sharedSchedules[index].title = trimmed
+        persist()
+    }
+
+    /// 删除一份导入的分享课表。
+    func deleteSharedSchedule(id: String) {
+        cache.sharedSchedules.removeAll { $0.id == id }
+        selectedCourseScheduleIndex = min(selectedCourseScheduleIndex, max(courseSchedules.count - 1, 0))
+        persist()
     }
 
     /// 设置是否显示周六课程。
@@ -320,6 +470,19 @@ final class ScheduleViewModel: ObservableObject {
     func setShowCourseLiveActivityReminder(_ value: Bool) {
         cache.showCourseLiveActivityReminder = value
         persist()
+
+        if value {
+            Task { [weak self] in
+                let granted = await ScheduleLiveActivityManager.shared.requestNotificationAuthorizationIfNeeded()
+                if !granted {
+                    self?.notice = ScheduleNotice(
+                        title: "通知未开启",
+                        message: "灵动岛需要应用常驻前台；应用未能自动启动时，会使用本地通知，以避免您错过上课。请在系统设置中允许 BIT101 发送通知。"
+                    )
+                }
+                await ScheduleLiveActivityManager.shared.refreshFromCurrentCache(trigger: "reminder_toggle_enabled")
+            }
+        }
     }
 
     /// 设置灵动岛/锁屏提醒的提前显示阈值。
@@ -341,7 +504,7 @@ final class ScheduleViewModel: ObservableObject {
         for (index, line) in lines.enumerated() {
             let parts = line.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             guard parts.count == 2 else {
-                throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "时间表格式错误。"])
+                throw scheduleValidationError("时间表格式错误。")
             }
 
             let start = parts[0]
@@ -349,17 +512,17 @@ final class ScheduleViewModel: ObservableObject {
             let startMinutes = TimeSlot.parseMinutes(start)
             let endMinutes = TimeSlot.parseMinutes(end)
             guard endMinutes > startMinutes else {
-                throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "时间表格式错误。"])
+                throw scheduleValidationError("时间表格式错误。")
             }
             if let last = timeTable.last, startMinutes <= last.endMinutes {
-                throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "时间表格式错误。"])
+                throw scheduleValidationError("时间表格式错误。")
             }
 
             timeTable.append(TimeSlot(id: index + 1, start: start, end: end))
         }
 
         guard !timeTable.isEmpty else {
-            throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "时间表格式错误。"])
+            throw scheduleValidationError("时间表格式错误。")
         }
 
         cache.timeTable = timeTable
@@ -385,12 +548,12 @@ final class ScheduleViewModel: ObservableObject {
     func addCourse(_ draft: CourseDraft) throws {
         let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else {
-            throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "课程名称不能为空。"])
+            throw scheduleValidationError("课程名称不能为空。")
         }
 
         let weeks = try parseWeeksText(draft.weeksText)
         guard draft.startSection > 0, draft.endSection >= draft.startSection else {
-            throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "节次范围不合法。"])
+            throw scheduleValidationError("节次范围不合法。")
         }
 
         cache.courses.append(
@@ -458,6 +621,34 @@ final class ScheduleViewModel: ObservableObject {
         persist()
     }
 
+    /// 导入一份分享的课表载荷。
+    ///
+    /// 导入后的课表会作为一份“只读分身”追加到当前账号本地缓存中，
+    /// 不覆盖我自己的课表、DDL、自定义日程和显示设置。
+    func importSharedSchedule(_ payload: ScheduleExportPayload) throws {
+        guard !payload.isEmpty else {
+            throw scheduleValidationError("分享的课表里没有课程数据。")
+        }
+        guard !payload.firstDayString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw scheduleValidationError("分享的课表缺少学期起始日期。")
+        }
+        guard !payload.timeTable.isEmpty else {
+            throw scheduleValidationError("分享的课表缺少时间表。")
+        }
+
+        let titleBase = payload.currentTerm.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = String((titleBase.isEmpty ? "分享课表" : "\(titleBase)课表").prefix(scheduleNameCharacterLimit))
+        cache.sharedSchedules.append(
+            SharedScheduleRecord(
+                title: title,
+                payload: payload
+            )
+        )
+        persist()
+        selectedCourseScheduleIndex = courseSchedules.count - 1
+        selectedWeek = min(max(resolvedCurrentWeek(), 1), maxWeek)
+    }
+
     /// 把已有自定义日程转成编辑草稿；如果为空则生成一份默认草稿。
     func customScheduleDraft(for record: CustomScheduleRecord?) -> CustomScheduleDraft {
         guard let record else {
@@ -481,7 +672,7 @@ final class ScheduleViewModel: ObservableObject {
         let beginMinutes = ScheduleDateCodec.minutesOfDay(from: draft.beginTime)
         let endMinutes = ScheduleDateCodec.minutesOfDay(from: draft.endTime)
         guard endMinutes > beginMinutes else {
-            throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "结束时间必须晚于开始时间。"])
+            throw scheduleValidationError("结束时间必须晚于开始时间。")
         }
 
         cache.customSchedules.append(
@@ -503,7 +694,7 @@ final class ScheduleViewModel: ObservableObject {
         let beginMinutes = ScheduleDateCodec.minutesOfDay(from: draft.beginTime)
         let endMinutes = ScheduleDateCodec.minutesOfDay(from: draft.endTime)
         guard endMinutes > beginMinutes else {
-            throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "结束时间必须晚于开始时间。"])
+            throw scheduleValidationError("结束时间必须晚于开始时间。")
         }
 
         guard let index = cache.customSchedules.firstIndex(where: { $0.id == id }) else { return }
@@ -725,7 +916,7 @@ final class ScheduleViewModel: ObservableObject {
             .filter { !$0.isEmpty }
 
         guard !segments.isEmpty else {
-            throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "周次不能为空。"])
+            throw scheduleValidationError("周次不能为空。")
         }
 
         var weeks = Set<Int>()
@@ -734,14 +925,14 @@ final class ScheduleViewModel: ObservableObject {
             if segment.contains("-") {
                 let bounds = segment.split(separator: "-").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 guard bounds.count == 2, let lower = Int(bounds[0]), let upper = Int(bounds[1]), lower > 0, upper >= lower else {
-                    throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "周次格式不正确，请使用如 1-16,18 的写法。"])
+                    throw scheduleValidationError("周次格式不正确，请使用如 1-16,18 的写法。")
                 }
                 for week in lower ... upper {
                     weeks.insert(week)
                 }
             } else {
                 guard let week = Int(segment), week > 0 else {
-                    throw NSError(domain: "BIT101.Schedule", code: -1, userInfo: [NSLocalizedDescriptionKey: "周次格式不正确，请使用如 1-16,18 的写法。"])
+                    throw scheduleValidationError("周次格式不正确，请使用如 1-16,18 的写法。")
                 }
                 weeks.insert(week)
             }
@@ -973,7 +1164,9 @@ final class ScheduleViewModel: ObservableObject {
 
     /// 从磁盘重新加载缓存，并同步周次与当前教学楼。
     private func reloadFromDisk() {
+        let previousScheduleIndex = selectedCourseScheduleIndex
         cache = ScheduleCacheStore.load()
+        selectedCourseScheduleIndex = min(max(previousScheduleIndex, 0), max(courseSchedules.count - 1, 0))
         selectedWeek = min(max(resolvedCurrentWeek(), 1), maxWeek)
         selectedBuildingID = cache.selectedBuildingID
     }

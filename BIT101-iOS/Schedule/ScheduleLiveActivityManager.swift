@@ -5,9 +5,12 @@
 //  Created by Codex on 2026-03-28.
 //
 
+#if canImport(ActivityKit) && !targetEnvironment(macCatalyst)
+
 import ActivityKit
 import Foundation
 import os
+import UserNotifications
 
 /// 课程提醒 Live Activity 的固定属性。
 struct CourseReminderActivityAttributes: ActivityAttributes {
@@ -42,7 +45,14 @@ private struct CourseReminderOccurrence {
 final class ScheduleLiveActivityManager {
     static let shared = ScheduleLiveActivityManager()
 
+    enum NotificationAuthorizationState {
+        case allowed
+        case notDetermined
+        case denied
+    }
+
     private let logger = Logger(subsystem: "BIT101", category: "ScheduleLiveActivity")
+    private let notificationCenter = UNUserNotificationCenter.current()
     private var scheduledRefreshTask: Task<Void, Never>?
     private var scheduledEndTask: Task<Void, Never>?
 
@@ -59,16 +69,11 @@ final class ScheduleLiveActivityManager {
     func refreshFromCurrentCache(trigger: String = "unspecified") async {
         logger.debug("refreshFromCurrentCache trigger=\(trigger, privacy: .public)")
 
-        guard #available(iOS 16.2, *), ActivityAuthorizationInfo().areActivitiesEnabled else {
-            logger.debug("live activity unavailable or disabled by system; ending all activities")
-            await endAllActivities()
-            return
-        }
-
         // 退出登录或远端登录态失效后，fake-cookie 会被清掉，但账号密码和课表缓存仍可能保留。
         // 课程提醒只应服务于“当前真实已登录”的账号，因此这里把会话有效性作为前置门槛。
         guard !LoginStorage.shared.fakeCookie.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             logger.debug("fake-cookie missing; treating session as signed out and ending all activities")
+            await clearFallbackNotifications()
             await endAllActivities()
             return
         }
@@ -76,12 +81,25 @@ final class ScheduleLiveActivityManager {
         let cache = ScheduleCacheStore.load()
         guard cache.showCourseLiveActivityReminder else {
             logger.debug("course live activity reminder disabled in settings; ending all activities")
+            await clearFallbackNotifications()
             await endAllActivities()
             return
         }
 
         let leadMinutes = cache.courseLiveActivityLeadMinutes
         let occurrences = resolveOccurrences(from: cache)
+        await syncFallbackNotifications(
+            for: occurrences,
+            leadMinutes: leadMinutes,
+            studentID: LoginStorage.shared.currentStudentID
+        )
+
+        guard #available(iOS 16.2, *), ActivityAuthorizationInfo().areActivitiesEnabled else {
+            logger.debug("live activity unavailable or disabled by system; keeping fallback notifications only")
+            await endAllActivities()
+            return
+        }
+
         logger.debug("resolved occurrences count=\(occurrences.count, privacy: .public) leadMinutes=\(leadMinutes, privacy: .public)")
         
         // 只在“进入提醒窗口但尚未开始”的课前阶段选择一条提醒对象。
@@ -106,6 +124,52 @@ final class ScheduleLiveActivityManager {
         scheduleEndForDisplayedOccurrence(currentOccurrence)
 
         await syncActivity(with: currentOccurrence)
+    }
+
+    /// 首次开启提醒时申请本地通知权限。
+    ///
+    /// 本地通知只作为“Activity 没起来时的兜底”，因此这里不强行要求用户必须授权；
+    /// 但如果用户允许，就能在 app 没被唤醒时按同一规则收到课前通知。
+    func requestNotificationAuthorizationIfNeeded() async -> Bool {
+        let settings = await notificationCenter.notificationSettings()
+
+        switch settings.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            return true
+        case .denied:
+            return false
+        case .notDetermined:
+            do {
+                return try await notificationCenter.requestAuthorization(options: [.alert, .sound])
+            } catch {
+                logger.error("request notification authorization failed: \(error.localizedDescription, privacy: .public)")
+                return false
+            }
+        @unknown default:
+            return false
+        }
+    }
+
+    /// 读取“课前提醒 fallback 通知”当前是否需要向用户发出权限提示。
+    ///
+    /// 只有在已开启灵动岛提醒时才检查通知权限；否则通知 fallback 对当前用户没有意义。
+    func notificationAuthorizationStateForReminderFallback() async -> NotificationAuthorizationState {
+        let cache = ScheduleCacheStore.load()
+        guard cache.showCourseLiveActivityReminder else {
+            return .allowed
+        }
+
+        let settings = await notificationCenter.notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            return .allowed
+        case .notDetermined:
+            return .notDetermined
+        case .denied:
+            return .denied
+        @unknown default:
+            return .denied
+        }
     }
 
     /// 将当前计算出的提醒对象同步到 ActivityKit。
@@ -182,13 +246,7 @@ final class ScheduleLiveActivityManager {
         scheduledRefreshTask?.cancel()
         
         let now = Date()
-        // 只需要关注两个时间点：1. 该显示新提醒了；2. 课程开始了（该消失了）。
-        let refreshPoints = occurrences.flatMap { occurrence in
-            [
-                effectiveDisplayWindowStart(for: occurrence, among: occurrences, leadMinutes: leadMinutes),
-                occurrence.startDate,
-            ]
-        }.filter { $0 > now.addingTimeInterval(1) }.sorted()
+        let refreshPoints = futureRefreshPoints(for: occurrences, leadMinutes: leadMinutes, now: now)
 
         guard let nextDate = refreshPoints.first else {
             logger.debug("scheduleNextRefresh: no future refresh point")
@@ -248,6 +306,41 @@ final class ScheduleLiveActivityManager {
         for activity in Activity<CourseReminderActivityAttributes>.activities {
             logger.debug("endAllActivities ending id=\(activity.id, privacy: .public)")
             await activity.end(nil, dismissalPolicy: .immediate)
+        }
+    }
+
+    /// 根据下一次提醒边界，给 BGAppRefreshTask 提供一个建议的最早启动时间。
+    ///
+    /// 这不是精确定时器，只是告诉系统“从这个时间点开始，如果你要给我后台时间，请尽量早一点给”。
+    /// 为了提高命中率，这里会比真实边界稍微提前 5 分钟申请。
+    func preferredBackgroundRefreshBeginDate() -> Date? {
+        let fakeCookie = LoginStorage.shared.fakeCookie.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !fakeCookie.isEmpty else { return nil }
+
+        let cache = ScheduleCacheStore.load()
+        guard cache.showCourseLiveActivityReminder else { return nil }
+
+        let leadMinutes = cache.courseLiveActivityLeadMinutes
+        let occurrences = resolveOccurrences(from: cache)
+        let now = Date()
+        let refreshPoints = futureRefreshPoints(for: occurrences, leadMinutes: leadMinutes, now: now)
+
+        guard let nextPoint = refreshPoints.first else { return nil }
+        let desiredBeginDate = nextPoint.addingTimeInterval(-5 * 60)
+        return max(now.addingTimeInterval(60), desiredBeginDate)
+    }
+
+    /// 删除当前账号的所有课前提醒 fallback 通知。
+    func clearFallbackNotifications() async {
+        let prefix = Self.notificationIdentifierPrefix
+        let pendingIdentifiers = await pendingFallbackNotificationIdentifiers(prefix: prefix)
+        if !pendingIdentifiers.isEmpty {
+            notificationCenter.removePendingNotificationRequests(withIdentifiers: pendingIdentifiers)
+        }
+
+        let deliveredIdentifiers = await deliveredFallbackNotificationIdentifiers(prefix: prefix)
+        if !deliveredIdentifiers.isEmpty {
+            notificationCenter.removeDeliveredNotifications(withIdentifiers: deliveredIdentifiers)
         }
     }
 
@@ -377,6 +470,135 @@ final class ScheduleLiveActivityManager {
         "\(displayTimeFormatter.string(from: start))-\(displayTimeFormatter.string(from: end))"
     }
 
+    /// 计算后续仍值得关注的刷新边界点。
+    ///
+    /// 当前调度只关心两个时刻：
+    /// 1. 某条提醒进入可展示窗口
+    /// 2. 某条提醒正式开始，现有提醒应结束
+    ///
+    /// 这套边界会同时被“本地 Task.sleep 调度”和“BGAppRefresh 建议时间”复用，
+    /// 因此集中成一个 helper，避免两边各自维护同一套时间计算。
+    private func futureRefreshPoints(
+        for occurrences: [CourseReminderOccurrence],
+        leadMinutes: Int,
+        now: Date
+    ) -> [Date] {
+        occurrences
+            .flatMap { occurrence in
+                [
+                    effectiveDisplayWindowStart(for: occurrence, among: occurrences, leadMinutes: leadMinutes),
+                    occurrence.startDate,
+                ]
+            }
+            .filter { $0 > now.addingTimeInterval(1) }
+            .sorted()
+    }
+
+    /// 按与 Live Activity 相同的规则预排本地通知。
+    ///
+    /// 这里不尝试判断“未来那一刻 Activity 是否一定会成功启动”，而是把通知作为兜底层：
+    /// 一旦 app 后台未被唤醒、Activity 没能准时出现，用户仍能在同一提醒窗口收到本地通知。
+    private func syncFallbackNotifications(
+        for occurrences: [CourseReminderOccurrence],
+        leadMinutes: Int,
+        studentID: String
+    ) async {
+        let settings = await notificationCenter.notificationSettings()
+        let allowedStatuses: Set<UNAuthorizationStatus> = [.authorized, .provisional, .ephemeral]
+        guard allowedStatuses.contains(settings.authorizationStatus) else {
+            logger.debug("notifications not authorized; clearing fallback reminders")
+            await clearFallbackNotifications()
+            return
+        }
+
+        await clearFallbackNotifications()
+
+        let now = Date()
+        let scheduledItems = occurrences
+            .compactMap { occurrence -> (CourseReminderOccurrence, Date)? in
+                let displayStart = effectiveDisplayWindowStart(
+                    for: occurrence,
+                    among: occurrences,
+                    leadMinutes: leadMinutes
+                )
+                guard displayStart > now.addingTimeInterval(1), displayStart < occurrence.startDate else {
+                    return nil
+                }
+                return (occurrence, displayStart)
+            }
+            .sorted { $0.1 < $1.1 }
+
+        guard !scheduledItems.isEmpty else {
+            logger.debug("no future fallback notifications to schedule")
+            return
+        }
+
+        for (index, item) in scheduledItems.prefix(64).enumerated() {
+            let occurrence = item.0
+            let triggerDate = item.1
+            let request = UNNotificationRequest(
+                identifier: Self.notificationIdentifier(studentID: studentID, index: index),
+                content: fallbackNotificationContent(for: occurrence),
+                trigger: UNCalendarNotificationTrigger(
+                    dateMatching: Calendar.current.dateComponents(
+                        [.year, .month, .day, .hour, .minute, .second],
+                        from: triggerDate
+                    ),
+                    repeats: false
+                )
+            )
+
+            do {
+                try await notificationCenter.add(request)
+            } catch {
+                logger.error(
+                    "schedule fallback notification failed title=\(occurrence.title, privacy: .public) trigger=\(Self.debugDateFormatter.string(from: triggerDate), privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+
+        logger.debug("scheduled fallback notifications count=\(min(scheduledItems.count, 64), privacy: .public)")
+    }
+
+    /// 构造与 Live Activity 同语义的本地通知内容。
+    private func fallbackNotificationContent(for occurrence: CourseReminderOccurrence) -> UNMutableNotificationContent {
+        let content = UNMutableNotificationContent()
+        content.title = occurrence.kindText == "日程" ? "即将开始日程" : "即将上课"
+
+        let subtitle = occurrence.classroom.trimmingCharacters(in: .whitespacesAndNewlines)
+        let teacher = occurrence.teacher.trimmingCharacters(in: .whitespacesAndNewlines)
+        let summary = [
+            occurrence.title,
+            Self.timeRangeText(start: occurrence.startDate, end: occurrence.endDate),
+            subtitle,
+            teacher.isEmpty || teacher == subtitle ? nil : teacher,
+        ]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+
+        content.body = summary
+        content.sound = .default
+        content.threadIdentifier = "BIT101.ScheduleReminder"
+        return content
+    }
+
+    private func pendingFallbackNotificationIdentifiers(prefix: String) async -> [String] {
+        await withCheckedContinuation { continuation in
+            notificationCenter.getPendingNotificationRequests { requests in
+                continuation.resume(returning: requests.map(\.identifier).filter { $0.hasPrefix(prefix) })
+            }
+        }
+    }
+
+    private func deliveredFallbackNotificationIdentifiers(prefix: String) async -> [String] {
+        await withCheckedContinuation { continuation in
+            notificationCenter.getDeliveredNotifications { notifications in
+                continuation.resume(returning: notifications.map(\.request.identifier).filter { $0.hasPrefix(prefix) })
+            }
+        }
+    }
+
     private static let displayTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -392,4 +614,48 @@ final class ScheduleLiveActivityManager {
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return formatter
     }()
+
+    private static let notificationIdentifierPrefix = "BIT101.ScheduleReminder"
+
+    private static func notificationIdentifier(studentID: String, index: Int) -> String {
+        "\(notificationIdentifierPrefix).\(studentID.isEmpty ? "__default__" : studentID).\(index)"
+    }
 }
+
+#else
+
+import Foundation
+
+/// Mac Catalyst 不支持 ActivityKit。
+///
+/// 当前这条提醒链路只服务 iPhone/iPad 的锁屏与灵动岛；在 Catalyst 下先提供一个
+/// 与 iOS 同签名的空实现，让项目能顺利编译并查看原生界面，而不强行移植提醒能力。
+@MainActor
+final class ScheduleLiveActivityManager {
+    static let shared = ScheduleLiveActivityManager()
+
+    enum NotificationAuthorizationState {
+        case allowed
+        case notDetermined
+        case denied
+    }
+
+    private init() {}
+
+    /// Catalyst 下不支持锁屏/灵动岛提醒，直接空操作。
+    func refreshFromCurrentCache(trigger: String = "unspecified") async {}
+
+    /// Catalyst 版不走本地通知兜底，也不弹权限请求。
+    func requestNotificationAuthorizationIfNeeded() async -> Bool { true }
+
+    /// 为了避免 Mac 预览时不断弹出“请开启通知”，这里固定视为允许。
+    func notificationAuthorizationStateForReminderFallback() async -> NotificationAuthorizationState { .allowed }
+
+    /// Catalyst 下没有 Activity 可结束，直接空操作。
+    func endAllActivities() async {}
+
+    /// Catalyst 下不注册 BGAppRefreshTask 链路。
+    func preferredBackgroundRefreshBeginDate() -> Date? { nil }
+}
+
+#endif

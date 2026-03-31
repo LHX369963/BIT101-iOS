@@ -7,6 +7,14 @@
 
 import Foundation
 
+/// 课表名称的统一长度上限。
+///
+/// 这一上限同时约束：
+/// - 设置页里的重命名输入
+/// - 导入分享课表后的默认命名
+/// - 旧缓存恢复后的标题展示
+let scheduleNameCharacterLimit = 8
+
 /// 本地缓存发生变化时发出的通知。
 ///
 /// 课表页、小组件导出和灵动岛刷新都会监听这条通知，用来做跨模块同步。
@@ -262,6 +270,7 @@ struct ClassroomAvailability: Identifiable, Hashable {
 /// - 课表显示设置
 /// - 灵动岛提醒设置
 struct ScheduleCache: Codable {
+    var primaryScheduleTitle = "课表"
     var currentTerm: String = ""
     var firstDayString: String = ""
     var lexueCalendarURL: String = ""
@@ -285,6 +294,7 @@ struct ScheduleCache: Codable {
     var showCourseLiveActivityReminder = false
     var courseLiveActivityLeadMinutes = 20
     var timeTable: [TimeSlot] = TimeSlot.default
+    var sharedSchedules: [SharedScheduleRecord] = []
 
     /// 首周日期的解码结果，便于课表直接计算当前周数。
     var firstDay: Date? {
@@ -292,6 +302,7 @@ struct ScheduleCache: Codable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case primaryScheduleTitle
         case currentTerm
         case firstDayString
         case lexueCalendarURL
@@ -315,6 +326,7 @@ struct ScheduleCache: Codable {
         case showCourseLiveActivityReminder
         case courseLiveActivityLeadMinutes
         case timeTable
+        case sharedSchedules
     }
 
     /// 提供一份带默认值的空缓存。
@@ -324,6 +336,9 @@ struct ScheduleCache: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
         currentTerm = try container.decodeIfPresent(String.self, forKey: .currentTerm) ?? ""
+        primaryScheduleTitle = Self.clampedScheduleTitle(
+            try container.decodeIfPresent(String.self, forKey: .primaryScheduleTitle) ?? "课表"
+        )
         firstDayString = try container.decodeIfPresent(String.self, forKey: .firstDayString) ?? ""
         lexueCalendarURL = try container.decodeIfPresent(String.self, forKey: .lexueCalendarURL) ?? ""
         courses = try container.decodeIfPresent([CourseRecord].self, forKey: .courses) ?? []
@@ -349,6 +364,82 @@ struct ScheduleCache: Codable {
             60
         )
         timeTable = try container.decodeIfPresent([TimeSlot].self, forKey: .timeTable) ?? TimeSlot.default
+        sharedSchedules = (try container.decodeIfPresent([SharedScheduleRecord].self, forKey: .sharedSchedules) ?? []).map {
+            var schedule = $0
+            schedule.title = Self.clampedScheduleTitle(schedule.title)
+            return schedule
+        }
+    }
+
+    /// 把课表标题裁到统一长度上限。
+    ///
+    /// 这里不额外做空值兜底，调用方如果需要“默认标题”，应先给出默认值再传入。
+    private static func clampedScheduleTitle(_ title: String) -> String {
+        String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(scheduleNameCharacterLimit))
+    }
+}
+
+/// 课表导出文件的精简载荷。
+///
+/// 导出课表的目标是分享排课本身，而不是同步整份本地缓存，因此这里只保留：
+/// - 学期
+/// - 首周
+/// - 时间表
+/// - 课程
+///
+/// 不包含 DDL、考试、自定义日程和个人显示偏好，避免把本地私有设置一起带出去。
+struct ScheduleExportPayload: Codable {
+    let formatVersion: Int
+    let exportedAt: Date
+    let currentTerm: String
+    let firstDayString: String
+    let timeTable: [TimeSlot]
+    let courses: [CourseRecord]
+
+    init(cache: ScheduleCache, exportedAt: Date = Date()) {
+        self.formatVersion = 1
+        self.exportedAt = exportedAt
+        self.currentTerm = cache.currentTerm
+        self.firstDayString = cache.firstDayString
+        self.timeTable = cache.timeTable
+        self.courses = cache.courses
+    }
+
+    /// 导出是否具备最基本的课表内容。
+    var isEmpty: Bool {
+        courses.isEmpty
+    }
+}
+
+/// 导入到本地后的分享课表记录。
+///
+/// 这类课表只承担“查看与切换”的职责，不参与提醒、DDL、空教室偏好等当前账号私有逻辑。
+struct SharedScheduleRecord: Codable, Identifiable, Hashable {
+    let id: String
+    var title: String
+    let importedAt: Date
+    let currentTerm: String
+    let firstDayString: String
+    let timeTable: [TimeSlot]
+    let courses: [CourseRecord]
+
+    init(
+        id: String = UUID().uuidString,
+        title: String,
+        importedAt: Date = Date(),
+        payload: ScheduleExportPayload
+    ) {
+        self.id = id
+        self.title = title
+        self.importedAt = importedAt
+        self.currentTerm = payload.currentTerm
+        self.firstDayString = payload.firstDayString
+        self.timeTable = payload.timeTable
+        self.courses = payload.courses
+    }
+
+    var isEmpty: Bool {
+        courses.isEmpty
     }
 }
 
@@ -518,12 +609,8 @@ enum ScheduleCacheStore {
             let data = try encoder.encode(cache)
             try data.write(to: url, options: [.atomic])
             ScheduleWidgetExporter.sync(cache: cache)
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(name: .scheduleCacheDidChange, object: nil)
-            }
-        } catch {
-            print("Failed to save schedule cache: \(error)")
-        }
+            postCacheDidChange()
+        } catch {}
     }
 
     /// 清空当前账号的日程缓存。
@@ -544,11 +631,17 @@ enum ScheduleCacheStore {
             }
 
             ScheduleWidgetExporter.syncFromCurrentCache()
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(name: .scheduleCacheDidChange, object: nil)
-            }
-        } catch {
-            print("Failed to clear schedule cache: \(error)")
+            postCacheDidChange()
+        } catch {}
+    }
+
+    /// 在主线程广播“课表缓存已变化”。
+    ///
+    /// 保存与清空缓存后都需要发这条通知，因此集中收口，避免两个入口各自重复写一遍
+    /// `DispatchQueue.main.async + post`。
+    private static func postCacheDidChange() {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .scheduleCacheDidChange, object: nil)
         }
     }
 }

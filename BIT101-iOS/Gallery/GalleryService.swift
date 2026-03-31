@@ -11,6 +11,7 @@ import Foundation
 enum GalleryServiceError: LocalizedError {
     case notLoggedIn
     case invalidResponse
+    case uploadFailed
 
     /// 给 UI 直接展示的错误文案。
     var errorDescription: String? {
@@ -19,6 +20,8 @@ enum GalleryServiceError: LocalizedError {
             return "当前登录状态无效，请重新登录后再查看话廊。"
         case .invalidResponse:
             return "服务器返回了无法识别的数据。"
+        case .uploadFailed:
+            return "图片上传失败。"
         }
     }
 }
@@ -237,21 +240,44 @@ struct GalleryService {
         try await sendJSONRequest(path: "posters/claims")
     }
 
+    /// 上传一张发帖图片，返回服务端生成的图片资源对象。
+    ///
+    /// 话廊发帖沿用 Android 端的老接口：先上传拿到 `mid`，再把 `image_mids`
+    /// 放进真正的发帖请求里。
+    func uploadImage(data: Data, filename: String = "poster.jpg") async throws -> GalleryImage {
+        let fakeCookie = try requireFakeCookie()
+
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var request = URLRequest(url: baseURL.appending(path: "upload/image"))
+        request.httpMethod = "POST"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.setValue(fakeCookie, forHTTPHeaderField: "fake-cookie")
+        request.httpBody = multipartBody(boundary: boundary, data: data, filename: filename)
+
+        let (responseData, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GalleryServiceError.invalidResponse
+        }
+        guard (200 ..< 300).contains(httpResponse.statusCode) else {
+            throw GalleryServiceError.uploadFailed
+        }
+
+        return try makeSnakeCaseDecoder().decode(GalleryImage.self, from: responseData)
+    }
+
     /// 发送帖子创建请求。
     ///
-    /// 当前 iOS 端尚未接图片上传和插件，所以 `image_mids` 与 `plugins` 先固定为空。
+    /// 图片会在发帖前单独上传；这里仅提交已经拿到的 `image_mids`。
     func createPoster(
         title: String,
         text: String,
+        imageMids: [String],
         anonymous: Bool,
         tags: [String],
         claimID: Int,
         isPublic: Bool
     ) async throws -> Int {
-        let fakeCookie = storage.fakeCookie
-        guard !fakeCookie.isEmpty else {
-            throw GalleryServiceError.notLoggedIn
-        }
+        let fakeCookie = try requireFakeCookie()
 
         let url = baseURL.appending(path: "posters")
         var request = URLRequest(url: url)
@@ -262,7 +288,7 @@ struct GalleryService {
             CreatePosterRequest(
                 title: title,
                 text: text,
-                imageMids: [],
+                imageMids: imageMids,
                 plugins: "[]",
                 anonymous: anonymous,
                 tags: tags,
@@ -278,9 +304,7 @@ struct GalleryService {
 
         switch httpResponse.statusCode {
         case 200 ..< 300:
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
-            return try decoder.decode(CreatePosterResponse.self, from: data).id
+            return try makeSnakeCaseDecoder().decode(CreatePosterResponse.self, from: data).id
         case 401:
             throw GalleryServiceError.notLoggedIn
         default:
@@ -304,10 +328,7 @@ struct GalleryService {
     ///
     /// 删除接口没有复杂返回体，只以 HTTP 成功与否为准。
     func deletePoster(id: Int) async throws {
-        let fakeCookie = storage.fakeCookie
-        guard !fakeCookie.isEmpty else {
-            throw GalleryServiceError.notLoggedIn
-        }
+        let fakeCookie = try requireFakeCookie()
 
         var request = URLRequest(url: baseURL.appending(path: "posters/\(id)"))
         request.httpMethod = "DELETE"
@@ -442,10 +463,7 @@ struct GalleryService {
         page: Int?,
         hideBot: Bool
     ) async throws -> [GalleryPoster] {
-        let fakeCookie = storage.fakeCookie
-        guard !fakeCookie.isEmpty else {
-            throw GalleryServiceError.notLoggedIn
-        }
+        let fakeCookie = try requireFakeCookie()
         var components = URLComponents(url: baseURL.appending(path: "posters"), resolvingAgainstBaseURL: false)
         var queryItems: [URLQueryItem] = []
 
@@ -501,11 +519,8 @@ struct GalleryService {
             )
         }
 
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-
         do {
-            return try decoder.decode([GalleryPoster].self, from: data)
+            return try makeSnakeCaseDecoder().decode([GalleryPoster].self, from: data)
         } catch {
             throw GalleryServiceError.invalidResponse
         }
@@ -526,10 +541,7 @@ struct GalleryService {
         method: String = "GET",
         body: Data? = nil
     ) async throws -> Response {
-        let fakeCookie = storage.fakeCookie
-        guard !fakeCookie.isEmpty else {
-            throw GalleryServiceError.notLoggedIn
-        }
+        let fakeCookie = try requireFakeCookie()
 
         var components = URLComponents(url: baseURL.appending(path: path), resolvingAgainstBaseURL: false)
         components?.queryItems = queryItems.isEmpty ? nil : queryItems
@@ -565,13 +577,45 @@ struct GalleryService {
             )
         }
 
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-
         do {
-            return try decoder.decode(Response.self, from: data)
+            return try makeSnakeCaseDecoder().decode(Response.self, from: data)
         } catch {
             throw GalleryServiceError.invalidResponse
         }
+    }
+
+    /// 统一读取并校验当前 fake-cookie。
+    ///
+    /// 话廊绝大多数接口都依赖这条登录态，因此在服务层集中收口可以避免每个请求方法
+    /// 都重复写一遍“读取 -> 判空 -> 抛 notLoggedIn”。
+    private func requireFakeCookie() throws -> String {
+        let fakeCookie = storage.fakeCookie
+        guard !fakeCookie.isEmpty else {
+            throw GalleryServiceError.notLoggedIn
+        }
+        return fakeCookie
+    }
+
+    /// 构造一份按 snake_case 解码的 JSONDecoder。
+    ///
+    /// 当前话廊后端响应几乎都遵循同一套命名规则，因此这里集中提供一个最小 helper，
+    /// 避免每个请求方法都重复配置 `keyDecodingStrategy`。
+    private func makeSnakeCaseDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }
+
+    /// 手工拼装上传接口需要的 multipart body。
+    ///
+    /// 表单字段名保持为 `file`，与 Android 端和现有头像上传接口一致。
+    private func multipartBody(boundary: String, data: Data, filename: String) -> Data {
+        var body = Data()
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
+        body.append(data)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        return body
     }
 }

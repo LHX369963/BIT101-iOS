@@ -327,8 +327,7 @@ private struct CampusTileMapView: UIViewRepresentable {
 
     /// 创建并初始化原生 `MKMapView`。
     ///
-    /// 之所以不使用纯 SwiftUI `Map`，是因为这里需要更细粒度地控制瓦片、相机、
-    /// attribution 处理和定位回调。
+    /// 之所以不使用纯 SwiftUI `Map`，是因为这里需要更细粒度地控制瓦片、相机和定位回调。
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView(frame: .zero)
         mapView.delegate = context.coordinator
@@ -343,10 +342,6 @@ private struct CampusTileMapView: UIViewRepresentable {
         applyFocus(to: mapView, animated: false, scale: scale)
         context.coordinator.lastFocusID = focusRequest.id
         context.coordinator.lastScale = scale
-        suppressSystemAttribution(in: mapView)
-        DispatchQueue.main.async {
-            suppressSystemAttribution(in: mapView)
-        }
 
         return mapView
     }
@@ -365,18 +360,10 @@ private struct CampusTileMapView: UIViewRepresentable {
             return
         }
 
-        guard context.coordinator.lastScale != scale else {
-            DispatchQueue.main.async {
-                suppressSystemAttribution(in: mapView)
-            }
-            return
-        }
+        guard context.coordinator.lastScale != scale else { return }
 
         applyScale(to: mapView, from: context.coordinator.lastScale ?? scale, to: scale)
         context.coordinator.lastScale = scale
-        DispatchQueue.main.async {
-            suppressSystemAttribution(in: mapView)
-        }
     }
 
     private func applyFocus(to mapView: MKMapView, animated: Bool, scale: Double) {
@@ -401,34 +388,6 @@ private struct CampusTileMapView: UIViewRepresentable {
             heading: mapView.camera.heading
         )
         mapView.setCamera(camera, animated: false)
-    }
-
-    /// 压掉 MapKit 左下角默认的英文 attribution / legal label。
-    ///
-    /// 当前页面已经有明确的地图来源标识，这里只做最小隐藏，不影响地图本身交互。
-    private func suppressSystemAttribution(in mapView: MKMapView) {
-        hideAttributionViews(in: mapView)
-    }
-
-    private func hideAttributionViews(in root: UIView) {
-        for subview in root.subviews {
-            let className = NSStringFromClass(type(of: subview))
-            let shouldHideByClass = className.contains("Attribution") || className.contains("Legal")
-            let shouldHideByText = (subview as? UILabel).map { label in
-                let text = label.text ?? ""
-                return text.localizedCaseInsensitiveContains("map data")
-                    || text.localizedCaseInsensitiveContains("legal")
-                    || text.localizedCaseInsensitiveContains("autonavi")
-            } ?? false
-
-            if shouldHideByClass || shouldHideByText {
-                subview.isHidden = true
-                subview.alpha = 0
-                subview.isUserInteractionEnabled = false
-            }
-
-            hideAttributionViews(in: subview)
-        }
     }
 
     final class Coordinator: NSObject, MKMapViewDelegate {

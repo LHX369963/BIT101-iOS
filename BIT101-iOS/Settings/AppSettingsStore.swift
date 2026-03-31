@@ -82,10 +82,6 @@ struct AppSettingsSnapshot: Codable, Equatable {
     var galleryHiddenPosters: [HiddenPosterRecord] = []
     /// 当前设备接受过的社区规则版本号。
     var galleryCommunityRulesAcceptedVersion = 0
-    /// 是否自动检查新版本。
-    var autoDetectUpgrade = true
-    /// 被用户忽略的版本号。
-    var ignoredVersion: Int = -1
 }
 
 @MainActor
@@ -99,9 +95,11 @@ final class AppSettingsStore: ObservableObject {
     /// 当前社区规则版本号；版本提升后会强制重新弹出规则确认。
     nonisolated static let currentCommunityRulesVersion = 2
     /// 当前开屏公告版本号；变化后会重新展示一次。
-    nonisolated static let currentStartupNoticeVersion = "1.2.0"
+    nonisolated static let currentStartupNoticeVersion = "1.2.1"
     /// 开屏公告已读状态对应的全局 key。
     nonisolated static let startupNoticeSeenKey = "app.startup.notice.seen.version"
+    private static let encoder = JSONEncoder()
+    private static let decoder = JSONDecoder()
 
     @Published private(set) var snapshot = AppSettingsSnapshot()
 
@@ -141,8 +139,6 @@ final class AppSettingsStore: ObservableObject {
     var galleryHiddenPosters: [HiddenPosterRecord] { snapshot.galleryHiddenPosters }
     var galleryHiddenPosterIDs: [Int] { snapshot.galleryHiddenPosters.map(\.id) }
     var hasAcceptedCurrentCommunityRules: Bool { snapshot.galleryCommunityRulesAcceptedVersion >= Self.currentCommunityRulesVersion }
-    var autoDetectUpgrade: Bool { snapshot.autoDetectUpgrade }
-    var ignoredVersion: Int { snapshot.ignoredVersion }
     var shouldShowCurrentStartupNotice: Bool {
         defaults.string(forKey: Self.startupNoticeSeenKey) != Self.currentStartupNoticeVersion
     }
@@ -262,18 +258,6 @@ final class AppSettingsStore: ObservableObject {
         save()
     }
 
-    /// 修改自动检查更新开关。
-    func setAutoDetectUpgrade(_ enabled: Bool) {
-        snapshot.autoDetectUpgrade = enabled
-        save()
-    }
-
-    /// 记录用户忽略的版本号。
-    func setIgnoredVersion(_ version: Int) {
-        snapshot.ignoredVersion = version
-        save()
-    }
-
     /// 标记当前版本的开屏通知已读。
     func markCurrentStartupNoticeSeen() {
         defaults.set(Self.currentStartupNoticeVersion, forKey: Self.startupNoticeSeenKey)
@@ -302,7 +286,7 @@ final class AppSettingsStore: ObservableObject {
     ///
     /// 所有设置入口最终都汇总到这里落盘，保证同一账号只维护一份快照。
     private func save() {
-        if let data = try? JSONEncoder().encode(snapshot) {
+        if let data = try? Self.encoder.encode(snapshot) {
             defaults.set(data, forKey: currentStorageKey)
         }
     }
@@ -316,7 +300,7 @@ final class AppSettingsStore: ObservableObject {
     static func loadSnapshotFromDefaults(for accountID: String) -> AppSettingsSnapshot? {
         guard
             let data = UserDefaults.standard.data(forKey: storageKey(for: accountID)),
-            let snapshot = try? JSONDecoder().decode(AppSettingsSnapshot.self, from: data)
+            let snapshot = try? decoder.decode(AppSettingsSnapshot.self, from: data)
         else {
             return nil
         }

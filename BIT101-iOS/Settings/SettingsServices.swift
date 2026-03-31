@@ -33,6 +33,11 @@ struct SettingsNetworkService {
     private let baseURL = URL(string: "https://bit101.flwfdd.xyz")!
     private let session: URLSession
     private let storage: LoginStorage
+    private static let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }()
 
     /// 初始化设置中心网络层。
     ///
@@ -62,8 +67,7 @@ struct SettingsNetworkService {
     ///
     /// 接口要求整份资料一起提交，因此调用方需要自行传入“未改动但仍需保留”的旧值。
     func updateUser(nickname: String?, motto: String?, avatarMid: String?) async throws {
-        let fakeCookie = storage.fakeCookie
-        guard !fakeCookie.isEmpty else { throw SettingsServiceError.notLoggedIn }
+        let fakeCookie = try requireFakeCookie()
 
         let body = try JSONEncoder().encode([
             "nickname": nickname,
@@ -89,8 +93,7 @@ struct SettingsNetworkService {
     ///
     /// 上传成功后还需要再调用一次 `updateUser`，把返回的 `mid` 绑定到用户资料里。
     func uploadAvatar(data: Data, filename: String = "avatar.jpg") async throws -> GalleryImage {
-        let fakeCookie = storage.fakeCookie
-        guard !fakeCookie.isEmpty else { throw SettingsServiceError.notLoggedIn }
+        let fakeCookie = try requireFakeCookie()
 
         let boundary = "Boundary-\(UUID().uuidString)"
         var request = URLRequest(url: baseURL.appending(path: "upload/image"))
@@ -107,9 +110,7 @@ struct SettingsNetworkService {
             throw SettingsServiceError.uploadFailed
         }
 
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(GalleryImage.self, from: responseData)
+        return try Self.decoder.decode(GalleryImage.self, from: responseData)
     }
 
     /// 检查当前登录状态是否仍然有效。
@@ -121,8 +122,7 @@ struct SettingsNetworkService {
 
     /// 发送带 fake-cookie 的通用 GET JSON 请求。
     private func sendAuthedJSONRequest<Response: Decodable>(path: String) async throws -> Response {
-        let fakeCookie = storage.fakeCookie
-        guard !fakeCookie.isEmpty else { throw SettingsServiceError.notLoggedIn }
+        let fakeCookie = try requireFakeCookie()
 
         var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = "GET"
@@ -136,9 +136,14 @@ struct SettingsNetworkService {
             throw NSError(domain: "BIT101.Settings", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "请求失败，HTTP 状态码 \(httpResponse.statusCode)。"])
         }
 
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(Response.self, from: data)
+        return try Self.decoder.decode(Response.self, from: data)
+    }
+
+    /// 统一读取并校验当前 fake-cookie。
+    private func requireFakeCookie() throws -> String {
+        let fakeCookie = storage.fakeCookie
+        guard !fakeCookie.isEmpty else { throw SettingsServiceError.notLoggedIn }
+        return fakeCookie
     }
 
     /// 手工拼装头像上传接口需要的 multipart body。

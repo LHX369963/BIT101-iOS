@@ -540,8 +540,6 @@ struct BIT101APIClient {
                 return
             }
 
-            let html = String(decoding: data, as: UTF8.self)
-            print("School redirect chain unexpected response: \(response.statusCode) \(nextURL.absoluteString) \(html.prefix(120))")
             throw errorForStatusCode(response.statusCode)
         }
     }
@@ -716,7 +714,6 @@ struct BIT101APIClient {
             \(nsError.localizedDescription)
             """
 
-            print(message)
             return NSError(
                 domain: nsError.domain,
                 code: nsError.code,
@@ -731,7 +728,6 @@ struct BIT101APIClient {
         \(nsError.localizedDescription)
         """
 
-        print(message)
         return NSError(
             domain: nsError.domain,
             code: nsError.code,

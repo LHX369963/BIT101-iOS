@@ -116,6 +116,31 @@ struct ScheduleService {
     private let lexueBaseURL = URL(string: "https://lexue.bit.edu.cn")!
     private let session: URLSession
     private let redirectDelegate = HTTPSUpgradingRedirectDelegate()
+    private static let decoder = JSONDecoder()
+    private static let icsUTCDateTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+        return formatter
+    }()
+    private static let icsLocalDateTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+        formatter.dateFormat = "yyyyMMdd'T'HHmmss"
+        return formatter
+    }()
+    private static let icsDateOnlyFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+        formatter.dateFormat = "yyyyMMdd"
+        return formatter
+    }()
 
     /// 构造带共享 cookie 与 HTTPS 升级能力的会话。
     init() {
@@ -518,25 +543,15 @@ struct ScheduleService {
 
     /// 解析 ICS 中常见的三种日期格式。
     private func parseICSDate(_ string: String) -> Date? {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-
         if string.hasSuffix("Z") {
-            formatter.timeZone = TimeZone(secondsFromGMT: 0)
-            formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
-            return formatter.date(from: string)
+            return Self.icsUTCDateTimeFormatter.date(from: string)
         }
 
-        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
-        formatter.dateFormat = "yyyyMMdd'T'HHmmss"
-
-        if let date = formatter.date(from: string) {
+        if let date = Self.icsLocalDateTimeFormatter.date(from: string) {
             return date
         }
 
-        formatter.dateFormat = "yyyyMMdd"
-        return formatter.date(from: string)
+        return Self.icsDateOnlyFormatter.date(from: string)
     }
 
     /// 还原 ICS 字段里的转义字符。
@@ -571,7 +586,7 @@ struct ScheduleService {
         }
 
         do {
-            return try JSONDecoder().decode(Response.self, from: data)
+            return try Self.decoder.decode(Response.self, from: data)
         } catch {
             throw ScheduleServiceError.invalidResponse
         }

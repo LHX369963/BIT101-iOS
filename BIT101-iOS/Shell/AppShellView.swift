@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 /// 应用底部 Tab 的稳定标识。
 ///
@@ -76,10 +77,13 @@ struct AppShellView: View {
     let studentID: String
     let onLogout: () -> Void
 
+    @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var settings = AppSettingsStore.shared
     @State private var selectedTab: AppTab = .schedule
     @State private var isShowingGalleryEULA = false
     @State private var isShowingStartupNotice = false
+    @State private var isShowingScheduleNotificationPrompt = false
     @State private var requestedScheduleSection: ScheduleSection?
 
     /// 登录后的应用壳层主体。
@@ -126,12 +130,13 @@ struct AppShellView: View {
                 }
             )
         }
-        .alert("1.2.0版本更新", isPresented: $isShowingStartupNotice) {
+        .alert("1.2.1版本更新", isPresented: $isShowingStartupNotice) {
             Button("确定") {
                 settings.markCurrentStartupNoticeSeen()
+                refreshScheduleNotificationPromptIfNeeded()
             }
         } message: {
-            Text("1、bugfix\n2、支持锁屏小组件\n3、灵动岛完善\n可以尝试在“课程表设置”内启用灵动岛哦～")
+            Text("1、bugfix\n2、移植到了mac端\n3、优化发帖体验")
         }
         .onAppear {
             let initial = settings.visibleTabs.contains(settings.homeTab) ? settings.homeTab : (settings.visibleTabs.first ?? .schedule)
@@ -140,12 +145,21 @@ struct AppShellView: View {
             }
             if settings.shouldShowCurrentStartupNotice {
                 isShowingStartupNotice = true
+            } else {
+                refreshScheduleNotificationPromptIfNeeded()
             }
         }
         .onChange(of: settings.snapshot) { _, _ in
             if !settings.visibleTabs.contains(selectedTab) {
                 selectedTab = settings.visibleTabs.first ?? .schedule
             }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            guard newPhase == .active else { return }
+            refreshScheduleNotificationPromptIfNeeded()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .scheduleCacheDidChange)) { _ in
+            refreshScheduleNotificationPromptIfNeeded()
         }
         .onOpenURL { url in
             handleIncomingURL(url)
@@ -187,6 +201,110 @@ struct AppShellView: View {
                 requestedScheduleSection = .courses
             }
         }
+    }
+
+    /// 统一刷新“灵动岛提醒的通知权限提示”状态。
+    ///
+    /// 这层检查不能只放在 `onAppear`：
+    /// - 用户可能刚从系统设置改完通知权限返回
+    /// - 用户可能刚在课表设置里打开了灵动岛提醒
+    /// - 用户也可能在前后台切换后才需要重新评估 fallback 能力
+    ///
+    /// 因此这里把提示状态集中收口，供 onAppear / 回前台 / 课表缓存变化共同复用。
+    private func refreshScheduleNotificationPromptIfNeeded() {
+        Task {
+            let authorizationState = await ScheduleLiveActivityManager.shared.notificationAuthorizationStateForReminderFallback()
+            await MainActor.run {
+                if settings.shouldShowCurrentStartupNotice {
+                    isShowingStartupNotice = true
+                    return
+                }
+
+                if authorizationState != .allowed {
+                    presentScheduleNotificationPromptIfNeeded()
+                }
+            }
+        }
+    }
+
+    private func presentScheduleNotificationPromptIfNeeded(retryCount: Int = 4) {
+        if isShowingScheduleNotificationPrompt {
+            return
+        }
+
+        guard let rootViewController = topViewController() else {
+            guard retryCount > 0 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                presentScheduleNotificationPromptIfNeeded(retryCount: retryCount - 1)
+            }
+            return
+        }
+
+        if let currentAlert = rootViewController as? UIAlertController,
+           currentAlert.title == "请开启通知" {
+            isShowingScheduleNotificationPrompt = true
+            return
+        }
+
+        if let presentedAlert = rootViewController.presentedViewController as? UIAlertController,
+           presentedAlert.title == "请开启通知" {
+            isShowingScheduleNotificationPrompt = true
+            return
+        }
+
+        // 这里故意使用 UIKit 的 `UIAlertController`，而不是再叠一层 SwiftUI `.alert`。
+        //
+        // 原因是壳层本身已经承载了启动公告等弹窗；如果继续在同一层叠多个 SwiftUI alert，
+        // 启动时很容易出现提示互相抢占、状态算出来了但界面没有真正弹出的情况。
+        // 这属于当前项目里一处明确的“非原生 SwiftUI UI 实现”，保留它只是为了稳定性，
+        // 后续若要回收这条绕路实现，优先方向应该是统一顶层弹窗路由，而不是直接删回 `.alert`。
+        let alert = UIAlertController(
+            title: "请开启通知",
+            message: "灵动岛需要应用常驻前台；应用未能自动启动时，会使用本地通知，以避免您错过上课。请在系统设置中允许 BIT101 发送通知。",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in
+            isShowingScheduleNotificationPrompt = false
+        })
+        alert.addAction(UIAlertAction(title: "转到设置", style: .default) { _ in
+            isShowingScheduleNotificationPrompt = false
+            guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+            openURL(url)
+        })
+
+        isShowingScheduleNotificationPrompt = true
+        rootViewController.present(alert, animated: true)
+    }
+
+    private func topViewController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+
+        let scene = scenes.first(where: { $0.activationState == .foregroundActive })
+            ?? scenes.first(where: { $0.activationState == .foregroundInactive })
+            ?? scenes.first
+
+        let root = scene?.windows.first(where: \.isKeyWindow)?.rootViewController
+            ?? scene?.windows.first(where: { !$0.isHidden && $0.rootViewController != nil })?.rootViewController
+            ?? scene?.windows.first?.rootViewController
+        return topViewController(from: root)
+    }
+
+    /// 从当前场景的根控制器向上追到真正可展示提示的最顶层控制器。
+    ///
+    /// 由于通知权限提示使用的是 UIKit alert，这里必须自己处理导航栈、Tab 容器和已呈现控制器，
+    /// 否则很容易把提示挂到一个当前并不可见的控制器上，表现出来就像“没有弹窗”。
+    private func topViewController(from viewController: UIViewController?) -> UIViewController? {
+        if let navigationController = viewController as? UINavigationController {
+            return topViewController(from: navigationController.visibleViewController)
+        }
+        if let tabBarController = viewController as? UITabBarController {
+            return topViewController(from: tabBarController.selectedViewController)
+        }
+        if let presented = viewController?.presentedViewController {
+            return topViewController(from: presented)
+        }
+        return viewController
     }
 }
 

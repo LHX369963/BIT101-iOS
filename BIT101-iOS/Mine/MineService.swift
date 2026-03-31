@@ -106,10 +106,7 @@ struct MineService {
         path: String,
         queryItems: [URLQueryItem] = []
     ) async throws -> Response {
-        let fakeCookie = storage.fakeCookie
-        guard !fakeCookie.isEmpty else {
-            throw MineServiceError.notLoggedIn
-        }
+        let fakeCookie = try requireFakeCookie()
 
         var components = URLComponents(url: baseURL.appending(path: path), resolvingAgainstBaseURL: false)
         components?.queryItems = queryItems.isEmpty ? nil : queryItems
@@ -140,13 +137,29 @@ struct MineService {
             )
         }
 
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-
         do {
-            return try decoder.decode(Response.self, from: data)
+            return try makeSnakeCaseDecoder().decode(Response.self, from: data)
         } catch {
             throw MineServiceError.invalidResponse
         }
+    }
+
+    /// 统一读取并校验当前 fake-cookie。
+    ///
+    /// “我的”模块所有接口都依赖同一份登录态，因此把判空逻辑收成一个 helper，
+    /// 可以避免每个请求入口重复写同一套错误分支。
+    private func requireFakeCookie() throws -> String {
+        let fakeCookie = storage.fakeCookie
+        guard !fakeCookie.isEmpty else {
+            throw MineServiceError.notLoggedIn
+        }
+        return fakeCookie
+    }
+
+    /// 构造按 snake_case 解码的 JSONDecoder。
+    private func makeSnakeCaseDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
     }
 }

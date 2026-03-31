@@ -75,22 +75,7 @@ enum ScheduleWidgetSnapshotStore {
             )
             let data = try encoder.encode(snapshot)
             try data.write(to: fileURL, options: [.atomic])
-        } catch {
-            print("Failed to save schedule widget snapshot: \(error)")
-        }
-    }
-
-    /// 清空共享快照文件。
-    static func clear() {
-        guard let fileURL else { return }
-
-        do {
-            if FileManager.default.fileExists(atPath: fileURL.path) {
-                try FileManager.default.removeItem(at: fileURL)
-            }
-        } catch {
-            print("Failed to clear schedule widget snapshot: \(error)")
-        }
+        } catch {}
     }
 
     /// App Group 中用于保存 widget 快照的文件路径。
@@ -148,9 +133,4 @@ enum ScheduleWidgetExporter {
         WidgetCenter.shared.reloadAllTimelines()
     }
 
-    /// 清空共享快照，并通知小组件更新空态。
-    static func clear() {
-        ScheduleWidgetSnapshotStore.clear()
-        WidgetCenter.shared.reloadAllTimelines()
-    }
 }

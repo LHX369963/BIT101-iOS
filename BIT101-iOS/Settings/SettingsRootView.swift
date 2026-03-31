@@ -7,6 +7,7 @@
 
 import PhotosUI
 import SwiftUI
+import UIKit
 import WebKit
 
 private let mitLicenseText = """
@@ -517,11 +518,36 @@ private struct ThemeSettingsPage: View {
 ///
 /// 这里既承载“数据同步入口”，也承载“课表显示项”和“灵动岛提醒”相关配置。
 private struct CalendarSettingsPage: View {
+    private struct ExportedScheduleCode: Identifiable {
+        let id = UUID()
+        let code: String
+    }
+
+    private struct ScheduleImportDraft: Identifiable {
+        let id = UUID()
+        var text = ""
+    }
+
+    private struct RenamingScheduleTarget: Identifiable {
+        enum Kind {
+            case primary
+            case shared(String)
+        }
+
+        let id = UUID()
+        let kind: Kind
+        let currentName: String
+        let title: String
+    }
+
     @StateObject private var viewModel = ScheduleViewModel()
     @State private var isShowingTimeTableEditor = false
     @State private var timeTableText = ""
     @State private var isShowingCustomSchedules = false
     @State private var isShowingLiveActivityLeadMinutesPicker = false
+    @State private var exportedScheduleCode: ExportedScheduleCode?
+    @State private var importDraft: ScheduleImportDraft?
+    @State private var renamingScheduleTarget: RenamingScheduleTarget?
 
     private var normalizedLeadMinutes: Int {
         min(max(viewModel.cache.courseLiveActivityLeadMinutes, 1), 60)
@@ -553,6 +579,44 @@ private struct CalendarSettingsPage: View {
 
                 Button("自定义日程") {
                     isShowingCustomSchedules = true
+                }
+
+                Button("分享课表") {
+                    exportScheduleCode()
+                }
+
+                Button("导入课表") {
+                    importDraft = ScheduleImportDraft()
+                }
+            }
+
+            Section("课表名称") {
+                Button {
+                    renamingScheduleTarget = RenamingScheduleTarget(
+                        kind: .primary,
+                        currentName: viewModel.cache.primaryScheduleTitle,
+                        title: "重命名课表"
+                    )
+                } label: {
+                    LabeledContent("我的课表", value: viewModel.cache.primaryScheduleTitle)
+                }
+
+                ForEach(viewModel.cache.sharedSchedules) { schedule in
+                    Button {
+                        renamingScheduleTarget = RenamingScheduleTarget(
+                            kind: .shared(schedule.id),
+                            currentName: schedule.title,
+                            title: "重命名分享课表"
+                        )
+                    } label: {
+                        LabeledContent("分享课表", value: schedule.title)
+                    }
+                }
+                .onDelete { offsets in
+                    let ids = offsets.compactMap { index in
+                        viewModel.cache.sharedSchedules.indices.contains(index) ? viewModel.cache.sharedSchedules[index].id : nil
+                    }
+                    ids.forEach(viewModel.deleteSharedSchedule)
                 }
             }
 
@@ -621,6 +685,30 @@ private struct CalendarSettingsPage: View {
                 )
             }
         }
+        .sheet(item: $exportedScheduleCode) { payload in
+            ScheduleExportCodeSheet(code: payload.code)
+        }
+        .sheet(item: $importDraft) { draft in
+            ScheduleImportCodeSheet(
+                initialText: draft.text,
+                onImport: { text in
+                    try importScheduleCode(text)
+                }
+            )
+        }
+        .sheet(item: $renamingScheduleTarget) { target in
+            ScheduleRenameSheet(
+                title: target.title,
+                initialName: target.currentName
+            ) { newName in
+                switch target.kind {
+                case .primary:
+                    try viewModel.renamePrimarySchedule(to: newName)
+                case let .shared(id):
+                    try viewModel.renameSharedSchedule(id: id, to: newName)
+                }
+            }
+        }
         .alert(item: $viewModel.notice) { notice in
             Alert(
                 title: Text(notice.title),
@@ -628,6 +716,65 @@ private struct CalendarSettingsPage: View {
                 dismissButton: .default(Text("知道了"))
             )
         }
+    }
+
+    /// 生成一份可复制的压缩课表编码。
+    ///
+    /// 当前编码格式为：
+    /// `BIT101SCH1:<base64(lzfse(json(payload)))>`
+    ///
+    /// 这样既保留了版本前缀，后续做导入时也能区分不同格式。
+    private func exportScheduleCode() {
+        let payload = ScheduleExportPayload(cache: viewModel.cache)
+        guard !payload.isEmpty else {
+            viewModel.notice = ScheduleNotice(title: "无法导出", message: "当前没有可导出的课程数据。")
+            return
+        }
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+
+        do {
+            let jsonData = try encoder.encode(payload)
+            guard let compressedData = try (jsonData as NSData).compressed(using: .lzfse) as Data? else {
+                throw NSError(domain: "BIT101.ScheduleExport", code: -1, userInfo: [NSLocalizedDescriptionKey: "课表压缩失败。"])
+            }
+            let code = "BIT101SCH1:\(compressedData.base64EncodedString())"
+            exportedScheduleCode = ExportedScheduleCode(code: code)
+        } catch {
+            viewModel.notice = ScheduleNotice(title: "导出失败", message: error.localizedDescription)
+        }
+    }
+
+    /// 解析并导入一份压缩编码的课表。
+    ///
+    /// 当前支持的格式为：
+    /// `BIT101SCH1:<base64(lzfse(json(payload)))>`
+    private func importScheduleCode(_ text: String) throws {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw NSError(domain: "BIT101.ScheduleImport", code: -1, userInfo: [NSLocalizedDescriptionKey: "请输入或粘贴课表编码。"])
+        }
+
+        let prefix = "BIT101SCH1:"
+        guard trimmed.hasPrefix(prefix) else {
+            throw NSError(domain: "BIT101.ScheduleImport", code: -1, userInfo: [NSLocalizedDescriptionKey: "课表编码格式不正确。"])
+        }
+
+        let body = String(trimmed.dropFirst(prefix.count))
+        guard let compressedData = Data(base64Encoded: body) else {
+            throw NSError(domain: "BIT101.ScheduleImport", code: -1, userInfo: [NSLocalizedDescriptionKey: "课表编码无法解码。"])
+        }
+
+        guard let jsonData = try (compressedData as NSData).decompressed(using: .lzfse) as Data? else {
+            throw NSError(domain: "BIT101.ScheduleImport", code: -1, userInfo: [NSLocalizedDescriptionKey: "课表编码解压失败。"])
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let payload = try decoder.decode(ScheduleExportPayload.self, from: jsonData)
+        try viewModel.importSharedSchedule(payload)
+        viewModel.notice = ScheduleNotice(title: "导入成功", message: "分享的课表已导入。考试、DDL 与自定义日程不会随导入覆盖。")
     }
 }
 
@@ -656,6 +803,180 @@ private struct CourseLiveActivityLeadMinutesPickerPage: View {
             }
         }
         .presentationDetents([.height(260)])
+    }
+}
+
+/// 导出的课表压缩编码预览页。
+///
+/// 这里先让用户看见完整编码，再决定是否复制，方便后续用在聊天、iMessage 或手动导入场景。
+private struct ScheduleExportCodeSheet: View {
+    let code: String
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var didCopy = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                ScrollView {
+                    Text(code)
+                        .font(.footnote.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+                }
+
+                Button {
+                    UIPasteboard.general.string = code
+                    didCopy = true
+                } label: {
+                    Label("复制到剪贴板", systemImage: "doc.on.doc")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding()
+            .navigationTitle("分享课表")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    ShareLink(item: code)
+                }
+            }
+            .alert("已复制", isPresented: $didCopy) {
+                Button("知道了", role: .cancel) {}
+            } message: {
+                Text("课表已复制到剪贴板。")
+            }
+        }
+    }
+}
+
+/// 导入课表压缩编码窗口。
+///
+/// 这里支持两种动作：
+/// - 手动粘贴/编辑编码
+/// - 一键从剪贴板读取
+private struct ScheduleImportCodeSheet: View {
+    let initialText: String
+    let onImport: (String) throws -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var text: String
+    @State private var localAlert: LoginAlert?
+
+    init(initialText: String, onImport: @escaping (String) throws -> Void) {
+        self.initialText = initialText
+        self.onImport = onImport
+        _text = State(initialValue: initialText)
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                TextEditor(text: $text)
+                    .font(.footnote.monospaced())
+                    .frame(minHeight: 220)
+                    .padding(10)
+                    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+
+                HStack(spacing: 12) {
+                    Button {
+                        if let clipboard = UIPasteboard.general.string, !clipboard.isEmpty {
+                            text = clipboard
+                        }
+                    } label: {
+                        Label("粘贴剪贴板", systemImage: "doc.on.clipboard")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        do {
+                            try onImport(text)
+                            dismiss()
+                        } catch {
+                            localAlert = LoginAlert(title: "导入失败", message: error.localizedDescription)
+                        }
+                    } label: {
+                        Label("导入", systemImage: "square.and.arrow.down")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding()
+            .navigationTitle("导入课表")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") {
+                        dismiss()
+                    }
+                }
+            }
+            .alert(item: $localAlert) { alert in
+                Alert(title: Text(alert.title), message: Text(alert.message), dismissButton: .default(Text("知道了")))
+            }
+        }
+    }
+}
+
+/// 课表重命名窗口。
+///
+/// 主课表和分享课表都共用这一套简单编辑器。
+private struct ScheduleRenameSheet: View {
+    let title: String
+    let initialName: String
+    let onSubmit: (String) throws -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var text: String
+    @State private var localAlert: LoginAlert?
+
+    init(title: String, initialName: String, onSubmit: @escaping (String) throws -> Void) {
+        self.title = title
+        self.initialName = initialName
+        self.onSubmit = onSubmit
+        _text = State(initialValue: initialName)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("课表名称", text: $text)
+                }
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("确定") {
+                        do {
+                            try onSubmit(text)
+                            dismiss()
+                        } catch {
+                            localAlert = LoginAlert(title: "保存失败", message: error.localizedDescription)
+                        }
+                    }
+                }
+            }
+            .alert(item: $localAlert) { alert in
+                Alert(title: Text(alert.title), message: Text(alert.message), dismissButton: .default(Text("知道了")))
+            }
+        }
     }
 }
 
@@ -884,7 +1205,6 @@ private struct AboutSettingsPage: View {
     private func clearUserDefaults() {
         if let bundleID = Bundle.main.bundleIdentifier {
             UserDefaults.standard.removePersistentDomain(forName: bundleID)
-            UserDefaults.standard.synchronize()
         }
     }
 

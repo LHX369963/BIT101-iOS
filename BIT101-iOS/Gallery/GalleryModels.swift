@@ -593,11 +593,6 @@ struct GalleryMessageUnreadCounts: Decodable, Equatable {
         system = try container.decodeIfPresent(Int.self, forKey: .system) ?? 0
     }
 
-    /// 统一给悬浮按钮计算红点总数。
-    var total: Int {
-        comment + follow + like + system
-    }
-
     /// 读取单个消息类型的未读数。
     func unreadCount(for type: GalleryMessageType) -> Int {
         switch type {

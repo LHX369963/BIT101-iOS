@@ -7,6 +7,21 @@
 
 import SwiftUI
 
+/// 统一生成“左右轻扫切换一级分栏”的横向手势。
+///
+/// 日程页当前使用 segmented + 手写拖拽切换，而不是系统 pager。
+/// 这里先把阈值判断收口，避免不同位置各自维护同一套手势逻辑。
+private func makeHorizontalSectionSwitchGesture(onStep: @escaping (Int) -> Void) -> some Gesture {
+    DragGesture(minimumDistance: 24, coordinateSpace: .local)
+        .onEnded { value in
+            let horizontal = value.translation.width
+            let vertical = value.translation.height
+
+            guard abs(horizontal) > abs(vertical), abs(horizontal) >= 56 else { return }
+            onStep(horizontal < 0 ? 1 : -1)
+        }
+}
+
 // MARK: - Schedule Root
 
 /// 统一压缩教室名称里的冗长楼名，提升课表卡片可读性。
@@ -39,7 +54,10 @@ struct ScheduleRootView: View {
     /// 日程主页主体。
     var body: some View {
         VStack(spacing: 0) {
-            ScheduleSectionTabs(selectedSection: $viewModel.selectedSection)
+            ScheduleSectionTabs(
+                selectedSection: $viewModel.selectedSection,
+                courseTitle: viewModel.activeCourseScheduleTitle
+            )
                 .padding(.horizontal, 10)
                 .padding(.top, 8)
                 .padding(.bottom, 8)
@@ -98,19 +116,7 @@ struct ScheduleRootView: View {
     ///
     /// 与话廊页保持同一套交互语义：顶部 segmented 可点，正文支持横向轻扫切换。
     private var sectionSwitchGesture: some Gesture {
-        DragGesture(minimumDistance: 24, coordinateSpace: .local)
-            .onEnded { value in
-                let horizontal = value.translation.width
-                let vertical = value.translation.height
-
-                guard abs(horizontal) > abs(vertical), abs(horizontal) >= 56 else { return }
-
-                if horizontal < 0 {
-                    switchSection(step: 1)
-                } else {
-                    switchSection(step: -1)
-                }
-            }
+        makeHorizontalSectionSwitchGesture(onStep: switchSection)
     }
 
     /// 根据方向切换一级分区。
@@ -149,13 +155,14 @@ struct ScheduleRootView: View {
 /// 保持成单独子视图后，根视图可以专注处理路由和副作用，而不是把 segmented 样式细节塞在一起。
 private struct ScheduleSectionTabs: View {
     @Binding var selectedSection: ScheduleSection
+    let courseTitle: String
 
     /// 日程页顶部原生分段控件。
     var body: some View {
         Picker("日程模块", selection: $selectedSection) {
-            ForEach(ScheduleSection.allCases) { section in
-                Text(section.title).tag(section)
-            }
+            Text(courseTitle).tag(ScheduleSection.courses)
+            Text(ScheduleSection.ddl.title).tag(ScheduleSection.ddl)
+            Text(ScheduleSection.classroom.title).tag(ScheduleSection.classroom)
         }
         .pickerStyle(.segmented)
     }
@@ -175,17 +182,25 @@ private struct CourseScheduleTabView: View {
     @State private var isShowingAddCourse = false
     @State private var settingsRoute: SettingsRoute?
 
+    private var activeSchedule: ScheduleViewModel.CourseScheduleVariant {
+        viewModel.activeCourseSchedule
+    }
+
+    private var supportsEditingDisplayedSchedule: Bool {
+        activeSchedule.isPrimary
+    }
+
     /// 课表分区主体。
     var body: some View {
         Group {
-            if viewModel.hasCourseData, let firstDay = viewModel.cache.firstDay {
+            if viewModel.hasCourseData, let firstDay = activeSchedule.firstDay {
                 GeometryReader { proxy in
                     ZStack(alignment: .bottomTrailing) {
                         CourseScheduleCalendarView(
                             entries: scheduleEntries,
                             week: viewModel.selectedWeek,
                             firstDay: firstDay,
-                            timeTable: viewModel.cache.timeTable,
+                            timeTable: activeSchedule.timeTable,
                             currentWeek: resolvedCurrentWeek(firstDay: firstDay),
                             showSaturday: viewModel.cache.showSaturday,
                             showSunday: viewModel.cache.showSunday,
@@ -212,22 +227,24 @@ private struct CourseScheduleTabView: View {
                             }
                             .disabled(viewModel.selectedWeek >= viewModel.maxWeek)
 
-                            Menu {
-                                Button("添加日程") {
-                                    editingCustomScheduleID = nil
-                                    customScheduleDraft = viewModel.customScheduleDraft(for: nil)
-                                    isShowingEditSchedule = true
-                                }
+                            if supportsEditingDisplayedSchedule {
+                                Menu {
+                                    Button("添加日程") {
+                                        editingCustomScheduleID = nil
+                                        customScheduleDraft = viewModel.customScheduleDraft(for: nil)
+                                        isShowingEditSchedule = true
+                                    }
 
-                                Button("添加课程") {
-                                    courseDraft = viewModel.courseDraft(for: viewModel.selectedWeek)
-                                    isShowingAddCourse = true
+                                    Button("添加课程") {
+                                        courseDraft = viewModel.courseDraft(for: viewModel.selectedWeek)
+                                        isShowingAddCourse = true
+                                    }
+                                } label: {
+                                    CourseScheduleFABLabel(systemImage: "plus")
                                 }
-                            } label: {
-                                CourseScheduleFABLabel(systemImage: "plus")
+                                .buttonStyle(.plain)
+                                .tint(.primary)
                             }
-                            .buttonStyle(.plain)
-                            .tint(.primary)
 
                             CourseScheduleFAB(systemImage: "gearshape") {
                                 settingsRoute = .calendar
@@ -240,31 +257,36 @@ private struct CourseScheduleTabView: View {
                 }
             } else {
                 VStack(spacing: 16) {
-                    Text("还没有课表数据")
+                    Text(activeSchedule.isPrimary ? "还没有课表数据" : "这份分享课表还没有课程")
                         .font(.headline)
-                    Text("请在校园网环境下，获取课表。")
+                    Text(activeSchedule.isPrimary ? "请在校园网环境下，获取课表。" : "试试上下滑切换到别的课表，或重新导入一份分享编码。")
                         .foregroundStyle(.secondary)
-                    Button {
-                        Task { await viewModel.syncCourses() }
-                    } label: {
-                        HStack {
-                            if viewModel.isSyncingCourses {
-                                ProgressView()
+                    if supportsEditingDisplayedSchedule {
+                        Button {
+                            Task { await viewModel.syncCourses() }
+                        } label: {
+                            HStack {
+                                if viewModel.isSyncingCourses {
+                                    ProgressView()
+                                }
+                                Text("获取课程表")
                             }
-                            Text("获取课程表")
                         }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(viewModel.isSyncingCourses)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(viewModel.isSyncingCourses)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .simultaneousGesture(scheduleSwitchGesture)
         .sheet(item: $selectedEntry) { entry in
             ScheduleEntryDetailSheet(
                 entry: entry,
                 currentWeek: viewModel.selectedWeek,
-                timeTable: viewModel.cache.timeTable,
+                timeTable: activeSchedule.timeTable,
+                allowsCourseMutation: supportsEditingDisplayedSchedule,
+                allowsCustomScheduleMutation: supportsEditingDisplayedSchedule,
                 onDeleteCourseOccurrence: {
                     viewModel.deleteCourseOccurrence(id: entry.sourceID, week: viewModel.selectedWeek)
                     selectedEntry = nil
@@ -346,8 +368,27 @@ private struct CourseScheduleTabView: View {
         editingCustomScheduleID = nil
     }
 
+    /// 课表之间的上下滑循环切换。
+    ///
+    /// 只在“课表”分区内启用，和上方一级分栏的左右滑切换分开处理。
+    private var scheduleSwitchGesture: some Gesture {
+        DragGesture(minimumDistance: 24, coordinateSpace: .local)
+            .onEnded { value in
+                let horizontal = value.translation.width
+                let vertical = value.translation.height
+
+                guard abs(vertical) > abs(horizontal), abs(vertical) >= 56 else { return }
+
+                if vertical < 0 {
+                    viewModel.cycleCourseSchedule(step: 1)
+                } else {
+                    viewModel.cycleCourseSchedule(step: -1)
+                }
+            }
+    }
+
     private var scheduleEntries: [ScheduleCalendarEntry] {
-        guard let firstDay = viewModel.cache.firstDay else {
+        guard let firstDay = activeSchedule.firstDay else {
             return []
         }
 
@@ -355,7 +396,7 @@ private struct CourseScheduleTabView: View {
         let weekStart = Calendar.current.date(byAdding: .day, value: (viewModel.selectedWeek - 1) * 7, to: firstDay) ?? firstDay
         let weekEnd = Calendar.current.date(byAdding: .day, value: 7, to: weekStart) ?? weekStart
 
-        let courseEntries = viewModel.cache.courses
+        let courseEntries = activeSchedule.courses
             .filter { $0.weeks.contains(viewModel.selectedWeek) }
             .map {
                 ScheduleCalendarEntry(
@@ -370,14 +411,14 @@ private struct CourseScheduleTabView: View {
                         $0.teacher.isEmpty ? nil : "教师：\($0.teacher)",
                         $0.classroom.isEmpty ? nil : "教室：\(normalizeDisplayedClassroom($0.classroom))",
                         "节次：\($0.sectionText)",
-                        "时间：\($0.timeText(using: viewModel.cache.timeTable))",
+                        "时间：\($0.timeText(using: activeSchedule.timeTable))",
                         $0.description.isEmpty ? nil : $0.description,
                     ].compactMap { $0 },
                     kind: .course
                 )
             }
 
-        let examEntries = viewModel.cache.showExamInfo ? viewModel.cache.exams.compactMap { exam -> ScheduleCalendarEntry? in
+        let examEntries = viewModel.cache.showExamInfo ? activeSchedule.exams.compactMap { exam -> ScheduleCalendarEntry? in
             guard
                 let examDate = ScheduleDateCodec.parseDate(exam.dateString),
                 examDate >= weekStart,
@@ -387,8 +428,8 @@ private struct CourseScheduleTabView: View {
             }
 
             let weekday = ScheduleDateCodec.weekdayIndex(from: examDate)
-            let startSection = convertTimeToSection(timeText: exam.beginTime, timeTable: viewModel.cache.timeTable)
-            let endSection = convertTimeToSection(timeText: exam.endTime, timeTable: viewModel.cache.timeTable)
+            let startSection = convertTimeToSection(timeText: exam.beginTime, timeTable: activeSchedule.timeTable)
+            let endSection = convertTimeToSection(timeText: exam.endTime, timeTable: activeSchedule.timeTable)
 
             guard endSection > startSection + 0.05 else {
                 return nil
@@ -413,7 +454,7 @@ private struct CourseScheduleTabView: View {
             )
         } : []
 
-        let customEntries = viewModel.cache.customSchedules.compactMap { schedule -> ScheduleCalendarEntry? in
+        let customEntries = activeSchedule.customSchedules.compactMap { schedule -> ScheduleCalendarEntry? in
             guard
                 let date = ScheduleDateCodec.parseDate(schedule.dateString),
                 date >= weekStart,
@@ -423,8 +464,8 @@ private struct CourseScheduleTabView: View {
             }
 
             let weekday = ScheduleDateCodec.weekdayIndex(from: date)
-            let startSection = convertTimeToSection(timeText: schedule.beginTime, timeTable: viewModel.cache.timeTable)
-            let endSection = convertTimeToSection(timeText: schedule.endTime, timeTable: viewModel.cache.timeTable)
+            let startSection = convertTimeToSection(timeText: schedule.beginTime, timeTable: activeSchedule.timeTable)
+            let endSection = convertTimeToSection(timeText: schedule.endTime, timeTable: activeSchedule.timeTable)
             guard endSection > startSection + 0.05 else {
                 return nil
             }
@@ -744,6 +785,8 @@ private struct ScheduleEntryDetailSheet: View {
     let entry: ScheduleCalendarEntry
     let currentWeek: Int
     let timeTable: [TimeSlot]
+    let allowsCourseMutation: Bool
+    let allowsCustomScheduleMutation: Bool
     let onDeleteCourseOccurrence: () -> Void
     let onDeleteCourse: () -> Void
     let onEditCustomSchedule: () -> Void
@@ -771,7 +814,7 @@ private struct ScheduleEntryDetailSheet: View {
                     }
                 }
 
-                if entry.kind == .course {
+                if entry.kind == .course, allowsCourseMutation {
                     Section {
                         Button("删除这节课", role: .destructive) {
                             pendingCourseDeletion = .occurrence
@@ -782,7 +825,7 @@ private struct ScheduleEntryDetailSheet: View {
                     }
                 }
 
-                if entry.kind == .custom {
+                if entry.kind == .custom, allowsCustomScheduleMutation {
                     Section {
                         Button("编辑") {
                             dismiss()
@@ -1526,10 +1569,6 @@ private struct FreeClassroomTabView: View {
             }
         }
         .listStyle(.insetGrouped)
-        .safeAreaInset(edge: .bottom) {
-            Color.clear
-                .frame(height: 0)
-        }
         .refreshable {
             await viewModel.refreshClassroomPage()
         }

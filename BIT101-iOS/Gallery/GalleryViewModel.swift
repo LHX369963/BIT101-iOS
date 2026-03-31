@@ -531,9 +531,10 @@ private final class GalleryMessageReadStore {
     ///
     /// 已读状态的判定规则是：出现在 latest 集合里，但还没出现在 seen 集合里。
     func unreadCount(for type: GalleryMessageType) -> Int {
-        let latest = Set(loadSnapshot().latestIDsByType[type.rawValue] ?? [])
+        let snapshot = loadSnapshot()
+        let latest = Set(snapshot.latestIDsByType[type.rawValue] ?? [])
         guard !latest.isEmpty else { return 0 }
-        let seen = Set(loadSnapshot().seenIDsByType[type.rawValue] ?? [])
+        let seen = Set(snapshot.seenIDsByType[type.rawValue] ?? [])
         return latest.subtracting(seen).count
     }
 

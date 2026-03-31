@@ -502,11 +502,17 @@ private struct MinePosterListView: View {
     @State private var deletedPosterIDs: Set<Int> = []
     private let service = GalleryService()
 
-    var body: some View {
-        // 这里同时叠加“社区屏蔽规则”和“本地刚删掉但服务端还没刷新回来”的过滤。
-        let visiblePosters = CommunityModeration
+    /// 当前真正可展示的帖子列表。
+    ///
+    /// 这里同时叠加“社区屏蔽规则”和“本地刚删掉但服务端还没刷新回来”的过滤，
+    /// 供列表主体与 loading 判断共同复用，避免两处各自维护一套相同过滤。
+    private var visiblePosters: [GalleryPoster] {
+        CommunityModeration
             .filterVisiblePosters(posters, snapshot: settings.snapshot)
             .filter { !deletedPosterIDs.contains($0.id) }
+    }
+
+    var body: some View {
         Group {
             if isInitialLoading {
                 ProgressView("正在加载帖子")
@@ -578,19 +584,25 @@ private struct MinePosterListView: View {
         .fullScreenCover(item: $imageViewer) { viewer in
             GalleryImageViewer(viewer: viewer)
         }
-        .confirmationDialog("删除帖子", isPresented: Binding(
-            get: { deletingPoster != nil },
-            set: { if !$0 { deletingPoster = nil } }
-        ), titleVisibility: .visible) {
+        .alert(
+            "删除帖子",
+            isPresented: Binding(
+                get: { deletingPoster != nil },
+                set: { if !$0 { deletingPoster = nil } }
+            ),
+            presenting: deletingPoster
+        ) { poster in
+            Button("取消", role: .cancel) {
+                deletingPoster = nil
+            }
             Button("删除", role: .destructive) {
-                guard let poster = deletingPoster else { return }
                 Task {
                     await deletePoster(poster)
                     deletingPoster = nil
                 }
             }
-        } message: {
-            Text("删除后无法恢复。")
+        } message: { poster in
+            Text("确定删除“\(poster.title.isEmpty ? "未命名帖子" : poster.title)”吗？删除后无法恢复。")
         }
         .alert(item: $alert) { alert in
             Alert(
@@ -604,7 +616,7 @@ private struct MinePosterListView: View {
     private var isInitialLoading: Bool {
         if case .idle = status { return true }
         if case .loading = status {
-            return CommunityModeration.filterVisiblePosters(posters, snapshot: settings.snapshot).isEmpty
+            return visiblePosters.isEmpty
         }
         return false
     }
@@ -654,36 +666,6 @@ private struct MineStatButton: View {
                 .font(.subheadline.weight(.bold))
                 .foregroundStyle(.secondary)
         }
-    }
-}
-
-/// 我的页使用的日期格式化工具。
-///
-/// 当前这个工具主要作为历史兼容保留，便于后续如果重新恢复“加入时间”等展示时直接复用。
-private enum MineDateDecoder {
-    private static let sourceFormatters: [DateFormatter] = [
-        makeFormatter("yyyy-MM-dd HH:mm:ss"),
-        makeFormatter("yyyy-MM-dd'T'HH:mm:ss.SSSZ"),
-        makeFormatter("yyyy-MM-dd'T'HH:mm:ssZ"),
-    ]
-
-    private static let iso8601Formatter = ISO8601DateFormatter()
-    private static func date(from string: String) -> Date? {
-        for formatter in sourceFormatters {
-            if let date = formatter.date(from: string) {
-                return date
-            }
-        }
-
-        return iso8601Formatter.date(from: string)
-    }
-
-    private static func makeFormatter(_ format: String) -> DateFormatter {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
-        formatter.dateFormat = format
-        return formatter
     }
 }
 

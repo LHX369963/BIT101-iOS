@@ -16,7 +16,9 @@
    如果你准备改具体模块，先看对应模块的维护清单和验证建议。
 5. [`MAINTENANCE_GUIDE.md`](MAINTENANCE_GUIDE.md)
    如果你准备长期维护、构建、签名、真机调试，这份最重要。
-6. [`FILE_INDEX.md`](FILE_INDEX.md)
+6. [`CODE_QUALITY_AUDIT.md`](CODE_QUALITY_AUDIT.md)
+   如果你准备继续清理大文件、收重复逻辑或评估哪些 UI 是刻意桥接实现，先看这份。
+7. [`FILE_INDEX.md`](FILE_INDEX.md)
    如果你已经知道自己要改什么，只是不知道文件在哪，从这里查最快。
 
 ## 每份文档的定位
@@ -31,6 +33,8 @@
   讲“改某个模块时先看什么、最容易坏什么、改完该验什么”。
 - `MAINTENANCE_GUIDE.md`
   讲工程维护、构建、真机、账号隔离、小组件和排障建议。
+- `CODE_QUALITY_AUDIT.md`
+  讲当前代码清理的落点、仍保留的桥接/非原生实现，以及后续继续收口时该优先看哪里。
 - `FILE_INDEX.md`
   讲全部 Swift 源码文件及其职责。
 
@@ -48,3 +52,5 @@
   优先看 `STATE_AND_STORAGE.md`
 - 想排查构建、签名、扩展问题
   优先看 `MAINTENANCE_GUIDE.md`
+- 想继续清理大文件或桥接实现
+  优先看 `CODE_QUALITY_AUDIT.md`

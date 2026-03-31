@@ -113,6 +113,11 @@ final class GalleryPosterDetailViewModel: ObservableObject {
     /// 固定的帖子 ID。后续刷新都基于它重新请求详情。
     private let posterID: Int
     private let service: GalleryService
+    /// 当前详情页对应的帖子对象 ID 字符串。
+    ///
+    /// 帖子详情、评论、点赞等接口都复用同一套 `poster{id}` 语义，把这层拼接抽成统一属性，
+    /// 可以避免同一个字面量在多个方法里重复出现。
+    private var posterObjectID: String { "poster\(posterID)" }
 
     /// 用列表卡片初始化详情状态机。
     ///
@@ -141,16 +146,13 @@ final class GalleryPosterDetailViewModel: ObservableObject {
     /// 同步刷新帖子详情和评论列表。
     func refreshAll() async {
         posterStatus = .loading
-        commentState.status = .loading
-        commentState.isLoadingMore = false
-        commentState.nextPage = 0
-        commentState.canLoadMore = true
+        resetCommentStateForRefresh()
 
         async let posterResult = loadResult { [self] in
             try await self.service.fetchPoster(id: self.posterID)
         }
         async let commentResult = loadResult { [self, commentOrder] in
-            try await self.service.fetchComments(objectID: "poster\(self.posterID)", order: commentOrder, page: nil)
+            try await self.service.fetchComments(objectID: self.posterObjectID, order: commentOrder, page: nil)
         }
 
         let resolvedPosterResult = await posterResult
@@ -162,14 +164,10 @@ final class GalleryPosterDetailViewModel: ObservableObject {
 
     /// 仅刷新评论区，不重新请求帖子正文。
     func refreshComments() async {
-        commentState.status = .loading
-        commentState.items = []
-        commentState.isLoadingMore = false
-        commentState.nextPage = 0
-        commentState.canLoadMore = true
+        resetCommentStateForRefresh()
 
         let result = await loadResult { [self] in
-            try await self.service.fetchComments(objectID: "poster\(self.posterID)", order: self.commentOrder, page: nil)
+            try await self.service.fetchComments(objectID: self.posterObjectID, order: self.commentOrder, page: nil)
         }
         handleCommentRefreshResult(result)
     }
@@ -190,23 +188,21 @@ final class GalleryPosterDetailViewModel: ObservableObject {
         }
 
         commentState.isLoadingMore = true
+        defer { commentState.isLoadingMore = false }
         let nextPage = commentState.nextPage
         let result = await loadResult { [self] in
-            try await self.service.fetchComments(objectID: "poster\(self.posterID)", order: self.commentOrder, page: nextPage)
+            try await self.service.fetchComments(objectID: self.posterObjectID, order: self.commentOrder, page: nextPage)
         }
 
         switch result {
         case let .success(comments):
             commentState.items.append(contentsOf: comments)
             commentState.nextPage += 1
-            commentState.isLoadingMore = false
             commentState.canLoadMore = !comments.isEmpty
         case let .failure(error):
             if isCancellation(error) {
-                commentState.isLoadingMore = false
                 return
             }
-            commentState.isLoadingMore = false
             alert = LoginAlert(title: "加载更多失败", message: error.localizedDescription)
         }
     }
@@ -230,7 +226,7 @@ final class GalleryPosterDetailViewModel: ObservableObject {
         defer { isLikingPoster = false }
 
         do {
-            let result = try await service.like(objectID: "poster\(posterID)")
+            let result = try await service.like(objectID: posterObjectID)
             poster = poster.updatingLike(result.like, likeNum: result.likeNum)
         } catch {
             if isCancellation(error) { return }
@@ -349,6 +345,18 @@ final class GalleryPosterDetailViewModel: ObservableObject {
             commentState.isLoadingMore = false
             alert = LoginAlert(title: "加载评论失败", message: error.localizedDescription)
         }
+    }
+
+    /// 把评论区恢复到“重新拉第一页”的初始加载状态。
+    ///
+    /// 详情页初次进入和切换评论排序时都要把评论分页状态整体重置，因此这里集中收口，
+    /// 避免同一组字段在多个方法里重复赋值。
+    private func resetCommentStateForRefresh() {
+        commentState.status = .loading
+        commentState.items = []
+        commentState.isLoadingMore = false
+        commentState.nextPage = 0
+        commentState.canLoadMore = true
     }
 
     /// 把抛错的异步操作包成 `Result`，方便并发拉详情和评论时统一收口。

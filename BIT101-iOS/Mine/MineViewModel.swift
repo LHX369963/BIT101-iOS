@@ -40,6 +40,39 @@ private func isMineCancellation(_ error: Error) -> Bool {
     return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
 }
 
+/// 把分页状态重置到“重新拉第一页”的初始状态。
+///
+/// “我的”模块里多个列表都沿用同一套分页状态结构，因此第一页刷新前的状态清空逻辑也完全一致。
+private func resetMinePagedState<Item>(_ state: inout MinePagedState<Item>) {
+    state.status = .loading
+    state.items = []
+    state.nextPage = 0
+    state.canLoadMore = true
+    state.isLoadingMore = false
+}
+
+/// 用新拉回来的第一页结果覆盖分页状态。
+///
+/// “我的”模块多个列表第一页刷新成功后的回写逻辑完全一致，因此集中成一个 helper，
+/// 避免每个刷新函数都各自维护同样一套字段赋值。
+private func applyMinePagedRefreshResult<Item>(_ items: [Item], to state: inout MinePagedState<Item>) {
+    state.items = items
+    state.status = .loaded
+    state.nextPage = 1
+    state.canLoadMore = !items.isEmpty
+    state.isLoadingMore = false
+}
+
+/// 将新加载的一页结果追加到已有分页状态中。
+///
+/// 关注、粉丝、帖子三类列表在“加载更多成功”时的状态推进规则相同，因此统一收口。
+private func appendMinePagedPage<Item>(_ items: [Item], to state: inout MinePagedState<Item>) {
+    state.items.append(contentsOf: items)
+    state.nextPage += 1
+    state.isLoadingMore = false
+    state.canLoadMore = !items.isEmpty
+}
+
 @MainActor
 /// “我的”页状态机。
 ///
@@ -127,18 +160,11 @@ final class MineViewModel: ObservableObject {
     ///
     /// 这里采用“整页重置再请求”的策略，因为粉丝/关注量通常不大，简单可靠比局部 diff 更重要。
     func refreshFollowers() async {
-        followerState.status = .loading
-        followerState.items = []
-        followerState.nextPage = 0
-        followerState.canLoadMore = true
-        followerState.isLoadingMore = false
+        resetMinePagedState(&followerState)
 
         do {
             let users = try await service.fetchFollowers(page: 0)
-            followerState.items = users
-            followerState.status = .loaded
-            followerState.nextPage = 1
-            followerState.canLoadMore = !users.isEmpty
+            applyMinePagedRefreshResult(users, to: &followerState)
         } catch {
             followerState.status = .failed(error.localizedDescription)
             followerState.canLoadMore = false
@@ -154,10 +180,7 @@ final class MineViewModel: ObservableObject {
         followerState.isLoadingMore = true
         do {
             let users = try await service.fetchFollowers(page: followerState.nextPage)
-            followerState.items.append(contentsOf: users)
-            followerState.nextPage += 1
-            followerState.isLoadingMore = false
-            followerState.canLoadMore = !users.isEmpty
+            appendMinePagedPage(users, to: &followerState)
         } catch {
             followerState.isLoadingMore = false
             alert = LoginAlert(title: "加载更多失败", message: error.localizedDescription)
@@ -166,18 +189,11 @@ final class MineViewModel: ObservableObject {
 
     /// 重新拉取关注列表第一页。
     func refreshFollowings() async {
-        followingState.status = .loading
-        followingState.items = []
-        followingState.nextPage = 0
-        followingState.canLoadMore = true
-        followingState.isLoadingMore = false
+        resetMinePagedState(&followingState)
 
         do {
             let users = try await service.fetchFollowings(page: 0)
-            followingState.items = users
-            followingState.status = .loaded
-            followingState.nextPage = 1
-            followingState.canLoadMore = !users.isEmpty
+            applyMinePagedRefreshResult(users, to: &followingState)
         } catch {
             followingState.status = .failed(error.localizedDescription)
             followingState.canLoadMore = false
@@ -193,10 +209,7 @@ final class MineViewModel: ObservableObject {
         followingState.isLoadingMore = true
         do {
             let users = try await service.fetchFollowings(page: followingState.nextPage)
-            followingState.items.append(contentsOf: users)
-            followingState.nextPage += 1
-            followingState.isLoadingMore = false
-            followingState.canLoadMore = !users.isEmpty
+            appendMinePagedPage(users, to: &followingState)
         } catch {
             followingState.isLoadingMore = false
             alert = LoginAlert(title: "加载更多失败", message: error.localizedDescription)
@@ -209,20 +222,12 @@ final class MineViewModel: ObservableObject {
     func refreshPosters() async {
         let hadPosters = !posterState.items.isEmpty || posterState.status == .loaded
         if !hadPosters {
-            posterState.status = .loading
-            posterState.items = []
-            posterState.nextPage = 0
-            posterState.canLoadMore = true
-            posterState.isLoadingMore = false
+            resetMinePagedState(&posterState)
         }
 
         do {
             let posters = try await service.fetchMyPosters(page: 0)
-            posterState.items = posters
-            posterState.status = .loaded
-            posterState.nextPage = 1
-            posterState.canLoadMore = !posters.isEmpty
-            posterState.isLoadingMore = false
+            applyMinePagedRefreshResult(posters, to: &posterState)
         } catch {
             posterState.isLoadingMore = false
 
@@ -251,10 +256,7 @@ final class MineViewModel: ObservableObject {
         posterState.isLoadingMore = true
         do {
             let posters = try await service.fetchMyPosters(page: posterState.nextPage)
-            posterState.items.append(contentsOf: posters)
-            posterState.nextPage += 1
-            posterState.isLoadingMore = false
-            posterState.canLoadMore = !posters.isEmpty
+            appendMinePagedPage(posters, to: &posterState)
         } catch {
             posterState.isLoadingMore = false
             alert = LoginAlert(title: "加载更多失败", message: error.localizedDescription)
@@ -352,20 +354,12 @@ final class UserProfileViewModel: ObservableObject {
     func refreshPosters() async {
         let hadPosters = !posterState.items.isEmpty || posterState.status == .loaded
         if !hadPosters {
-            posterState.status = .loading
-            posterState.items = []
-            posterState.nextPage = 0
-            posterState.canLoadMore = true
-            posterState.isLoadingMore = false
+            resetMinePagedState(&posterState)
         }
 
         do {
             let posters = try await service.fetchUserPosters(userID: userID, page: 0)
-            posterState.items = posters
-            posterState.status = .loaded
-            posterState.nextPage = 1
-            posterState.canLoadMore = !posters.isEmpty
-            posterState.isLoadingMore = false
+            applyMinePagedRefreshResult(posters, to: &posterState)
         } catch {
             posterState.isLoadingMore = false
 
@@ -394,10 +388,7 @@ final class UserProfileViewModel: ObservableObject {
         posterState.isLoadingMore = true
         do {
             let posters = try await service.fetchUserPosters(userID: userID, page: posterState.nextPage)
-            posterState.items.append(contentsOf: posters)
-            posterState.nextPage += 1
-            posterState.isLoadingMore = false
-            posterState.canLoadMore = !posters.isEmpty
+            appendMinePagedPage(posters, to: &posterState)
         } catch {
             posterState.isLoadingMore = false
             alert = LoginAlert(title: "加载更多失败", message: error.localizedDescription)

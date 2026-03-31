@@ -1,4 +1,6 @@
+import PhotosUI
 import SwiftUI
+import UIKit
 
 /// 一条尚未提交的自定义标签输入行。
 ///
@@ -6,6 +8,111 @@ import SwiftUI
 private struct GalleryCustomTagDraft: Identifiable, Equatable {
     let id = UUID()
     var text = ""
+}
+
+/// 发帖页里一张待上传或已上传完成的图片草稿。
+///
+/// Android 端的实现是“先上传得到服务端图片对象，再带 `mid` 发帖”。iOS 这里沿用同样的链路，
+/// 因此页面需要显式维护上传状态，而不是只记录一个本地 `UIImage`。
+private struct GalleryComposerImageDraft: Identifiable {
+    enum Status {
+        case uploading
+        case uploaded(GalleryImage)
+        case failed(String)
+    }
+
+    let id = UUID()
+    let previewData: Data
+    let filename: String
+    var status: Status = .uploading
+
+    /// 只有上传成功后，图片才会拿到可提交给发帖接口的 `mid`。
+    var uploadedImage: GalleryImage? {
+        guard case .uploaded(let image) = status else { return nil }
+        return image
+    }
+}
+
+/// 发帖页图片缩略图条目。
+///
+/// 这里保留 Android 类似的交互语义：
+/// - 上传中显示进度
+/// - 失败时允许重试
+/// - 任意状态都允许删除
+private struct GalleryComposerImageTile: View {
+    let draft: GalleryComposerImageDraft
+    let onRetry: () -> Void
+    let onRemove: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(Color(.secondarySystemGroupedBackground))
+
+                if let image = UIImage(data: draft.previewData) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Image(systemName: "photo")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 96, height: 96)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .overlay(alignment: .bottom) {
+                overlayContent
+            }
+
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.white, Color.black.opacity(0.55))
+            }
+            .padding(6)
+            .buttonStyle(.plain)
+        }
+        .frame(width: 96, height: 96)
+    }
+
+    @ViewBuilder
+    private var overlayContent: some View {
+        switch draft.status {
+        case .uploading:
+            ZStack {
+                Rectangle()
+                    .fill(.black.opacity(0.45))
+                ProgressView()
+                    .tint(.white)
+            }
+            .frame(height: 28)
+        case .uploaded:
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.circle.fill")
+                Text("已上传")
+            }
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            .background(.black.opacity(0.35))
+        case .failed:
+            Button(action: onRetry) {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.clockwise")
+                    Text("重试")
+                }
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+                .background(.red.opacity(0.82))
+            }
+            .buttonStyle(.plain)
+        }
+    }
 }
 
 /// 原生发帖页。
@@ -26,6 +133,12 @@ struct GalleryComposerView: View {
     @State private var selectedTags: [String] = []
     /// 用户手动新增的自定义标签输入行。
     @State private var customTagDrafts: [GalleryCustomTagDraft] = []
+    /// 当前通过图片选择器选中的图片集合。
+    ///
+    /// 系统 `PhotosPicker` 支持一次选择多张图，这里直接保留整批结果，再逐张加入上传队列。
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
+    /// 已经加入发帖草稿的图片列表。
+    @State private var imageDrafts: [GalleryComposerImageDraft] = []
     /// 是否匿名发布。
     @State private var anonymous = false
     /// 是否公开出现在信息流中。
@@ -141,6 +254,19 @@ struct GalleryComposerView: View {
                     Toggle("匿名发布", isOn: $anonymous)
                     Toggle("公开显示", isOn: $isPublic)
                 }
+
+                Section("图片") {
+                    PhotosPicker(selection: $selectedPhotoItems, maxSelectionCount: 9, matching: .images) {
+                        Label("插入图片", systemImage: "photo.badge.plus")
+                    }
+                    .disabled(isSubmitting)
+
+                    if hasUploadingImages {
+                        Text("图片上传中，上传完成后即可一并发布。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .navigationTitle("发布帖子")
             .navigationBarTitleDisplayMode(.inline)
@@ -156,9 +282,25 @@ struct GalleryComposerView: View {
                 }
             }
             .task { await loadClaimsIfNeeded() }
+            .onChange(of: selectedPhotoItems) { _, newValue in
+                guard !newValue.isEmpty else { return }
+                Task { await addImages(from: newValue) }
+            }
             .alert(item: $alert) { alert in
                 Alert(title: Text(alert.title), message: Text(alert.message), dismissButton: .default(Text("知道了")))
             }
+        }
+    }
+
+    /// 当前是否仍有图片在上传中。
+    ///
+    /// 上传中的图片不能提交，否则会出现 Android 端同样会拦掉的 “upload image error” 场景。
+    private var hasUploadingImages: Bool {
+        imageDrafts.contains {
+            if case .uploading = $0.status {
+                return true
+            }
+            return false
         }
     }
 
@@ -213,6 +355,16 @@ struct GalleryComposerView: View {
             alert = LoginAlert(title: "内容不合规", message: message)
             return
         }
+        guard !hasUploadingImages else {
+            alert = LoginAlert(title: "发布失败", message: "图片仍在上传，请稍候。")
+            return
+        }
+
+        let uploadedImages = imageDrafts.compactMap(\.uploadedImage)
+        guard uploadedImages.count == imageDrafts.count else {
+            alert = LoginAlert(title: "发布失败", message: "有图片上传失败，请删除后重试，或点“重试”重新上传。")
+            return
+        }
 
         isSubmitting = true
         defer { isSubmitting = false }
@@ -221,6 +373,7 @@ struct GalleryComposerView: View {
             _ = try await service.createPoster(
                 title: trimmedTitle,
                 text: trimmedText,
+                imageMids: uploadedImages.map(\.mid),
                 anonymous: anonymous,
                 tags: tags,
                 claimID: selectedClaimID,
@@ -268,6 +421,70 @@ struct GalleryComposerView: View {
     /// 删除指定的自定义标签输入行。
     private func removeCustomTagDraft(id: GalleryCustomTagDraft.ID) {
         customTagDrafts.removeAll { $0.id == id }
+    }
+
+    /// 从图片选择器批量追加图片并逐张开始上传。
+    ///
+    /// 这里故意按顺序处理：图片最终仍然会很快并发上传完，但顺序更稳定，
+    /// 发帖页里的缩略图排列也更接近用户在系统相册里点选的顺序。
+    private func addImages(from items: [PhotosPickerItem]) async {
+        defer { selectedPhotoItems = [] }
+
+        for item in items {
+            await addImage(from: item)
+        }
+    }
+
+    /// 从图片选择器追加一张新图并立即开始上传。
+    private func addImage(from item: PhotosPickerItem) async {
+
+        do {
+            guard let data = try await item.loadTransferable(type: Data.self) else {
+                throw GalleryServiceError.uploadFailed
+            }
+
+            let filename = "poster-\(UUID().uuidString).jpg"
+            var draft = GalleryComposerImageDraft(previewData: data, filename: filename)
+            imageDrafts.append(draft)
+
+            do {
+                let image = try await service.uploadImage(data: data, filename: filename)
+                draft.status = .uploaded(image)
+            } catch {
+                draft.status = .failed(error.localizedDescription)
+            }
+
+            replaceImageDraft(draft)
+        } catch {
+            alert = LoginAlert(title: "图片添加失败", message: error.localizedDescription)
+        }
+    }
+
+    /// 失败图片的重试上传。
+    private func retryImageUpload(id: GalleryComposerImageDraft.ID) async {
+        guard var draft = imageDrafts.first(where: { $0.id == id }) else { return }
+        draft.status = .uploading
+        replaceImageDraft(draft)
+
+        do {
+            let image = try await service.uploadImage(data: draft.previewData, filename: draft.filename)
+            draft.status = .uploaded(image)
+        } catch {
+            draft.status = .failed(error.localizedDescription)
+        }
+
+        replaceImageDraft(draft)
+    }
+
+    /// 删除一张草稿图片。
+    private func removeImageDraft(id: GalleryComposerImageDraft.ID) {
+        imageDrafts.removeAll { $0.id == id }
+    }
+
+    /// 按 `id` 回写图片草稿。
+    private func replaceImageDraft(_ draft: GalleryComposerImageDraft) {
+        guard let index = imageDrafts.firstIndex(where: { $0.id == draft.id }) else { return }
+        imageDrafts[index] = draft
     }
 
     /// 把预置标签和自定义标签合并成最终提交数组。
