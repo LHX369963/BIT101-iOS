@@ -862,6 +862,11 @@ struct GalleryPosterDetailView: View {
             UserProfileRootView(userID: route.userID)
         }
         .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("取消") {
+                    dismiss()
+                }
+            }
             if onReport != nil || viewModel.poster.own {
                 ToolbarItem(placement: .topBarTrailing) {
                     GalleryPosterActionMenu(
@@ -1307,6 +1312,7 @@ private struct GalleryCommentComposerSheet: View {
 private struct GallerySearchView: View {
     @ObservedObject var viewModel: GalleryViewModel
     @ObservedObject private var settings = AppSettingsStore.shared
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         GalleryFeedView(
@@ -1344,6 +1350,15 @@ private struct GallerySearchView: View {
         .task {
             await viewModel.bootstrapSearchIfNeeded()
         }
+        .navigationTitle("搜索")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("取消") {
+                    dismiss()
+                }
+            }
+        }
     }
 
     private var filteredSearchState: GalleryFeedState {
@@ -1358,6 +1373,7 @@ private struct GallerySearchView: View {
 /// Android 虽然最终落到网页，但后端已经提供独立消息接口，因此 iOS 直接走 native list。
 private struct GalleryMessagesView: View {
     @ObservedObject var viewModel: GalleryMessageViewModel
+    @Environment(\.dismiss) private var dismiss
     @State private var selectedPoster: GalleryPoster?
     @State private var localAlert: LoginAlert?
     private let service = GalleryService()
@@ -1432,6 +1448,11 @@ private struct GalleryMessagesView: View {
         .navigationTitle("消息")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("取消") {
+                    dismiss()
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button("全部已读") {
                     viewModel.markCurrentTypeAsRead()

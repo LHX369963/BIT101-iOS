@@ -74,6 +74,15 @@ enum AppTab: String, CaseIterable, Identifiable, Codable {
 ///
 /// 壳层只关心两件事：按照设置中心决定展示哪些 tab，以及把退出登录回调继续往下传。
 struct AppShellView: View {
+    private static let startupNoticeTitle = "1.2.1版本更新"
+    private static let startupNoticeBody = """
+    1、bugfix&设计语言统一
+    2、移植到了mac端
+    3、优化发帖体验
+    4、支持分享课表和导入分享
+    在课表视图上下滑动即可切换自己的课表与接分享的课表
+    """
+
     let studentID: String
     let onLogout: () -> Void
 
@@ -130,13 +139,15 @@ struct AppShellView: View {
                 }
             )
         }
-        .alert("1.2.1版本更新", isPresented: $isShowingStartupNotice) {
-            Button("确定") {
+        .sheet(isPresented: $isShowingStartupNotice) {
+            StartupNoticeSheet(
+                title: Self.startupNoticeTitle,
+                bodyText: Self.startupNoticeBody
+            ) {
                 settings.markCurrentStartupNoticeSeen()
+                isShowingStartupNotice = false
                 refreshScheduleNotificationPromptIfNeeded()
             }
-        } message: {
-            Text("1、bugfix\n2、移植到了mac端\n3、优化发帖体验")
         }
         .onAppear {
             let initial = settings.visibleTabs.contains(settings.homeTab) ? settings.homeTab : (settings.visibleTabs.first ?? .schedule)
@@ -305,6 +316,44 @@ struct AppShellView: View {
             return topViewController(from: presented)
         }
         return viewController
+    }
+}
+
+/// 启动后展示的版本更新说明。
+///
+/// 这里改成独立 sheet，而不是系统 alert，是为了保证正文左右留白完全对称；
+/// 系统 alert 对多行正文的内边距和换行控制较弱，长文本时视觉上容易显得左右不齐。
+private struct StartupNoticeSheet: View {
+    let title: String
+    let bodyText: String
+    let onConfirm: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 20) {
+                ScrollView {
+                    Text(bodyText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .lineSpacing(5)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 18)
+                        .background(
+                            Color(.secondarySystemGroupedBackground),
+                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        )
+                }
+
+                Button("确定", action: onConfirm)
+                    .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .padding(20)
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .interactiveDismissDisabled()
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.hidden)
     }
 }
 

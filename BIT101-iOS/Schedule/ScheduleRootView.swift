@@ -348,7 +348,7 @@ private struct CourseScheduleTabView: View {
         }
         .sheet(item: $settingsRoute) { route in
             NavigationStack {
-                SettingsRootView(initialRoute: route, studentID: "", onLogout: {})
+                SettingsRootView(initialRoute: route, studentID: "", onLogout: {}, showsCloseButton: true)
             }
         }
         .onChange(of: resetSignal) { _, _ in
@@ -840,8 +840,8 @@ private struct ScheduleEntryDetailSheet: View {
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("关闭") { dismiss() }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
                 }
             }
             .alert(item: $pendingCourseDeletion) { target in
@@ -1083,7 +1083,7 @@ struct CustomScheduleListSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("关闭") { dismiss() }
+                    Button("取消") { dismiss() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -1127,8 +1127,8 @@ struct CustomScheduleListSheet: View {
                     .navigationTitle("自定义日程")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button("关闭") { selectedRecord = nil }
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("取消") { selectedRecord = nil }
                         }
                     }
                 }
@@ -1429,8 +1429,8 @@ private struct DDLEventDetailSheet: View {
             .navigationTitle("DDL 详情")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("关闭") { dismiss() }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
                 }
             }
         }

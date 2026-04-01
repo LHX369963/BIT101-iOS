@@ -626,12 +626,6 @@ final class ScheduleViewModel: ObservableObject {
     /// 导入后的课表会作为一份“只读分身”追加到当前账号本地缓存中，
     /// 不覆盖我自己的课表、DDL、自定义日程和显示设置。
     func importSharedSchedule(_ payload: ScheduleExportPayload) throws {
-        guard !payload.isEmpty else {
-            throw scheduleValidationError("分享的课表里没有课程数据。")
-        }
-        guard !payload.firstDayString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw scheduleValidationError("分享的课表缺少学期起始日期。")
-        }
         guard !payload.timeTable.isEmpty else {
             throw scheduleValidationError("分享的课表缺少时间表。")
         }

@@ -92,6 +92,9 @@ struct SettingsRootView: View {
     let initialRoute: SettingsRoute?
     let studentID: String
     let onLogout: () -> Void
+    var showsCloseButton = false
+
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         Group {
@@ -103,6 +106,15 @@ struct SettingsRootView: View {
         }
         .navigationTitle(initialRoute?.title ?? "设置")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if showsCloseButton {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        dismiss()
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -545,6 +557,7 @@ private struct CalendarSettingsPage: View {
     @State private var timeTableText = ""
     @State private var isShowingCustomSchedules = false
     @State private var isShowingLiveActivityLeadMinutesPicker = false
+    @State private var isShowingEmptyScheduleExportConfirmation = false
     @State private var exportedScheduleCode: ExportedScheduleCode?
     @State private var importDraft: ScheduleImportDraft?
     @State private var renamingScheduleTarget: RenamingScheduleTarget?
@@ -709,6 +722,14 @@ private struct CalendarSettingsPage: View {
                 }
             }
         }
+        .alert("你尚未获取课表", isPresented: $isShowingEmptyScheduleExportConfirmation) {
+            Button("取消", role: .cancel) {}
+            Button("确定") {
+                exportScheduleCode(allowEmptyCourseData: true)
+            }
+        } message: {
+            Text("你尚未获取课表，仍要分享？")
+        }
         .alert(item: $viewModel.notice) { notice in
             Alert(
                 title: Text(notice.title),
@@ -724,10 +745,10 @@ private struct CalendarSettingsPage: View {
     /// `BIT101SCH1:<base64(lzfse(json(payload)))>`
     ///
     /// 这样既保留了版本前缀，后续做导入时也能区分不同格式。
-    private func exportScheduleCode() {
+    private func exportScheduleCode(allowEmptyCourseData: Bool = false) {
         let payload = ScheduleExportPayload(cache: viewModel.cache)
-        guard !payload.isEmpty else {
-            viewModel.notice = ScheduleNotice(title: "无法导出", message: "当前没有可导出的课程数据。")
+        guard allowEmptyCourseData || !payload.isEmpty else {
+            isShowingEmptyScheduleExportConfirmation = true
             return
         }
 
@@ -796,6 +817,11 @@ private struct CourseLiveActivityLeadMinutesPickerPage: View {
         .navigationTitle("提前显示阈值")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("取消") {
+                    dismiss()
+                }
+            }
             ToolbarItem(placement: .confirmationAction) {
                 Button("完成") {
                     dismiss()
@@ -841,7 +867,7 @@ private struct ScheduleExportCodeSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") {
+                    Button("取消") {
                         dismiss()
                     }
                 }
@@ -916,7 +942,7 @@ private struct ScheduleImportCodeSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") {
+                    Button("取消") {
                         dismiss()
                     }
                 }

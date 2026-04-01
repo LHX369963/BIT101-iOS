@@ -340,6 +340,13 @@ struct ScoreRootView: View {
                 }
                 .navigationTitle(row.courseName.isEmpty ? "成绩详情" : row.courseName)
                 .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") {
+                            selectedRow = nil
+                        }
+                    }
+                }
             }
         }
         .alert(item: $viewModel.alert) { alert in
