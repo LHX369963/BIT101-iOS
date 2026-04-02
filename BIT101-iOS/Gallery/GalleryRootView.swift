@@ -7,6 +7,28 @@
 
 import SwiftUI
 import UIKit
+import Network
+import Combine
+
+/// “话廊”底部页内部的一级内容分区。
+///
+/// 文章模块并入后，底部栏继续只保留“话廊”一个入口，
+/// 再通过这里的顶部栏在“话题 / 文章”之间切换。
+private enum GallerySurface: String, CaseIterable, Identifiable {
+    case gallery
+    case paper
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .gallery:
+            return "话题"
+        case .paper:
+            return "文章"
+        }
+    }
+}
 
 /// 统一生成“左右轻扫切换分区”的横向手势。
 ///
@@ -31,16 +53,65 @@ private func makeHorizontalSwitchGesture(onStep: @escaping (Int) -> Void) -> som
 ///
 /// 顶部负责 feed 切换，下方负责承载当前选中的帖子流，并支持左右轻扫切换分区。
 struct GalleryRootView: View {
+    @Environment(\.scenePhase) private var scenePhase
     /// 主 feed 视图模型，负责帖子流、搜索和详情入口状态。
     @StateObject private var viewModel = GalleryViewModel()
     /// 消息中心视图模型，与主 feed 独立，避免互相污染加载状态。
     @StateObject private var messageViewModel = GalleryMessageViewModel()
+    /// 监听网络从断开恢复为可用，帮助失败态自动重试。
+    @StateObject private var networkObserver = GalleryNetworkObserver()
     /// 全局话廊设置快照。
     @ObservedObject private var settings = AppSettingsStore.shared
     @State private var isShowingComposer = false
     @State private var isShowingMessages = false
+    @Binding private var requestedPaperID: Int?
+    @State private var selectedSurface: GallerySurface = .gallery
+
+    init(requestedPaperID: Binding<Int?> = .constant(nil)) {
+        _requestedPaperID = requestedPaperID
+    }
 
     var body: some View {
+        Group {
+            switch selectedSurface {
+            case .gallery:
+                galleryContent
+            case .paper:
+                PaperRootView(
+                    requestedPaperID: $requestedPaperID,
+                    selectedGallerySurfaceRawValue: Binding(
+                        get: { selectedSurface.rawValue },
+                        set: { newValue in
+                            selectedSurface = GallerySurface(rawValue: newValue) ?? .gallery
+                        }
+                    )
+                )
+            }
+        }
+        .safeAreaInset(edge: .top) {
+            Picker("话廊内容", selection: $selectedSurface) {
+                ForEach(GallerySurface.allCases) { surface in
+                    Text(surface.title).tag(surface)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
+            .background(Color(.systemGroupedBackground))
+        }
+        .task(id: requestedPaperID) {
+            guard requestedPaperID != nil else { return }
+            selectedSurface = .paper
+        }
+        .onChange(of: requestedPaperID) { _, newValue in
+            guard newValue != nil else { return }
+            selectedSurface = .paper
+        }
+        .toolbar(.hidden, for: .navigationBar)
+    }
+
+    private var galleryContent: some View {
         ZStack(alignment: .bottomTrailing) {
             Color(.systemGroupedBackground)
                 .ignoresSafeArea(edges: .bottom)
@@ -62,19 +133,19 @@ struct GalleryRootView: View {
             .simultaneousGesture(feedSwitchGesture)
 
             VStack(spacing: 10) {
+                GalleryFloatingActionButton(
+                    systemImage: "bell.badge",
+                    badgeText: messageBadgeText
+                ) {
+                    isShowingMessages = true
+                }
+
                 GalleryFloatingActionButton(systemImage: "square.and.pencil") {
                     isShowingComposer = true
                 }
 
                 GalleryFloatingActionButton(systemImage: "magnifyingglass") {
                     viewModel.isShowingSearch = true
-                }
-
-                GalleryFloatingActionButton(
-                    systemImage: "bell.badge",
-                    badgeText: messageBadgeText
-                ) {
-                    isShowingMessages = true
                 }
             }
             .padding(.trailing, 10)
@@ -92,7 +163,6 @@ struct GalleryRootView: View {
             .padding(.bottom, 6)
             .background(Color(.systemGroupedBackground))
         }
-        .toolbar(.hidden, for: .navigationBar)
         .task {
             async let feedTask: Void = viewModel.bootstrapIfNeeded()
             async let messageTask: Void = messageViewModel.refreshUnreadCounts()
@@ -103,6 +173,18 @@ struct GalleryRootView: View {
                 Task {
                     await viewModel.refresh(feed: newFeed)
                 }
+            }
+        }
+        .onChange(of: networkObserver.isReachable) { oldValue, newValue in
+            guard newValue, !oldValue else { return }
+            Task {
+                await retryCurrentFeedIfNeeded()
+            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            guard newPhase == .active else { return }
+            Task {
+                await retryCurrentFeedIfNeeded()
             }
         }
         .sheet(isPresented: $viewModel.isShowingSearch) {
@@ -160,6 +242,14 @@ struct GalleryRootView: View {
     private func switchFeed(step: Int) {
         let allFeeds = GalleryFeedKind.allCases
         guard let currentIndex = allFeeds.firstIndex(of: viewModel.selectedFeed) else { return }
+        let lastIndex = allFeeds.index(before: allFeeds.endIndex)
+
+        if (currentIndex == 0 && step == -1) || (currentIndex == lastIndex && step == 1) {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                selectedSurface = .paper
+            }
+            return
+        }
 
         let nextIndex = currentIndex + step
         guard allFeeds.indices.contains(nextIndex) else { return }
@@ -172,6 +262,44 @@ struct GalleryRootView: View {
     /// 过滤逻辑与 Android 一致：支持隐藏匿名用户，以及按 UID 黑名单过滤。
     private func filterPosters(_ posters: [GalleryPoster]) -> [GalleryPoster] {
         CommunityModeration.filterVisiblePosters(posters, snapshot: settings.snapshot)
+    }
+
+    /// 网络恢复或应用回前台时，如果当前 feed 仍停在失败空态，则自动再试一次。
+    ///
+    /// 这里故意只处理“失败且列表为空”的情况，避免用户已经在正常列表里阅读时被后台自动刷新打断。
+    private func retryCurrentFeedIfNeeded() async {
+        guard networkObserver.isReachable else { return }
+
+        let currentState = viewModel.state(for: viewModel.selectedFeed)
+        guard case .failed = currentState.status, currentState.posters.isEmpty else { return }
+
+        await viewModel.refresh(feed: viewModel.selectedFeed)
+    }
+}
+
+/// 轻量网络可达性观察器。
+///
+/// 这里不做全局联网状态管理，只负责把“网络从不可用恢复为可用”的边界事件抛给话廊页。
+/// 话廊失败态收到这个事件后，会尝试自动重拉当前 feed。
+@MainActor
+private final class GalleryNetworkObserver: ObservableObject {
+    @Published private(set) var isReachable = true
+
+    private let monitor = NWPathMonitor()
+    private let queue = DispatchQueue(label: "BIT101.GalleryNetworkObserver")
+
+    init() {
+        monitor.pathUpdateHandler = { [weak self] path in
+            let isReachable = path.status == .satisfied
+            DispatchQueue.main.async {
+                self?.isReachable = isReachable
+            }
+        }
+        monitor.start(queue: queue)
+    }
+
+    deinit {
+        monitor.cancel()
     }
 }
 
@@ -252,100 +380,103 @@ private struct GalleryFeedView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            Group {
+            ScrollView {
                 if isInitialLoading {
+                    galleryPlaceholderContainer {
                         ProgressView("正在加载话廊")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                 } else if case let .failed(message) = feedState.status, feedState.posters.isEmpty {
-                    ContentUnavailableView {
-                        Label("加载失败", systemImage: "exclamationmark.triangle")
-                    } description: {
-                        Text(message)
+                    galleryPlaceholderContainer {
+                        ContentUnavailableView {
+                            Label("加载失败", systemImage: "exclamationmark.triangle")
+                        } description: {
+                            Text(message)
+                        } actions: {
+                            Button("重试") {
+                                Task {
+                                    await onRefresh()
+                                }
+                            }
+                        }
                     }
                 } else {
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(Array(visiblePosters.enumerated()), id: \.element.id) { index, poster in
-                                VStack(spacing: 0) {
-                                    GalleryPosterCard(
-                                        poster: poster,
-                                        onOpenPoster: { selectedPoster = poster },
-                                        onOpenImage: { index, images in
-                                            imageViewer = GalleryImageViewerState(images: images, initialIndex: index)
-                                        },
-                                        onReport: { action in
-                                            reportContext = GalleryReportContext(poster: poster, action: action)
-                                        },
-                                        onDelete: nil
-                                    )
-
-                                    if index != visiblePosters.count - 1 {
-                                        Divider()
-                                            .padding(.leading, 14)
-                                    }
-                                }
-                                .id(poster.id)
-                                .background(
-                                    GeometryReader { geometry in
-                                        Color.clear.preference(
-                                            key: GalleryVisiblePosterOffsetPreferenceKey.self,
-                                            value: [poster.id: geometry.frame(in: .named(feedScrollSpaceName)).minY]
-                                        )
-                                    }
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(visiblePosters.enumerated()), id: \.element.id) { index, poster in
+                            VStack(spacing: 0) {
+                                GalleryPosterCard(
+                                    poster: poster,
+                                    onOpenPoster: { selectedPoster = poster },
+                                    onOpenImage: { index, images in
+                                        imageViewer = GalleryImageViewerState(images: images, initialIndex: index)
+                                    },
+                                    onReport: { action in
+                                        reportContext = GalleryReportContext(poster: poster, action: action)
+                                    },
+                                    onDelete: nil
                                 )
-                                .onAppear {
-                                    if prefetchTriggerPosterIDs.contains(poster.id) {
-                                        Task {
-                                            await onPrefetch(poster)
-                                        }
-                                    }
-                                    guard poster.id == visiblePosters.last?.id else { return }
-                                    Task {
-                                        await onLoadMore(poster)
-                                    }
+
+                                if index != visiblePosters.count - 1 {
+                                    Divider()
+                                        .padding(.leading, 14)
                                 }
                             }
-
-                            if feedState.isLoadingMore {
-                                HStack {
-                                    Spacer()
-                                    ProgressView()
-                                    Spacer()
+                            .id(poster.id)
+                            .background(
+                                GeometryReader { geometry in
+                                    Color.clear.preference(
+                                        key: GalleryVisiblePosterOffsetPreferenceKey.self,
+                                        value: [poster.id: geometry.frame(in: .named(feedScrollSpaceName)).minY]
+                                    )
                                 }
-                                .padding(.vertical, 12)
+                            )
+                            .onAppear {
+                                if prefetchTriggerPosterIDs.contains(poster.id) {
+                                    Task {
+                                        await onPrefetch(poster)
+                                    }
+                                }
+                                guard poster.id == visiblePosters.last?.id else { return }
+                                Task {
+                                    await onLoadMore(poster)
+                                }
                             }
                         }
-                        .scrollTargetLayout()
+
+                        if feedState.isLoadingMore {
+                            HStack {
+                                Spacer()
+                                ProgressView()
+                                Spacer()
+                            }
+                            .padding(.vertical, 12)
+                        }
                     }
-                    .coordinateSpace(name: feedScrollSpaceName)
-                    .background(Color(.systemGroupedBackground))
-                    .id(feedIdentity)
-                    .refreshable {
-                        pendingRestorePosterID = currentTopPosterID ?? visiblePosters.first?.id
-                        await onRefresh()
-                    }
-                    .onPreferenceChange(GalleryVisiblePosterOffsetPreferenceKey.self) { offsets in
-                        currentTopPosterID = topVisiblePosterID(from: offsets)
-                    }
-                    .onChange(of: visiblePosterIDs) { _, newIDs in
-                        restoreScrollPositionIfNeeded(with: proxy, availableIDs: newIDs)
-                    }
+                    .scrollTargetLayout()
                 }
             }
+            .coordinateSpace(name: feedScrollSpaceName)
             .background(Color(.systemGroupedBackground))
-            .sheet(item: $selectedPoster) { poster in
-                NavigationStack {
-                    GalleryPosterDetailView(
-                        poster: poster,
-                        onReport: { _ in },
-                        onDeleted: {
-                            deletedPosterIDs.insert(poster.id)
-                            await onRefresh()
-                        }
-                    )
-                }
-                .presentationDetents([.large])
-                .presentationDragIndicator(.hidden)
+            .id(feedIdentity)
+            .refreshable {
+                pendingRestorePosterID = currentTopPosterID ?? visiblePosters.first?.id
+                await onRefresh()
+            }
+            .onPreferenceChange(GalleryVisiblePosterOffsetPreferenceKey.self) { offsets in
+                currentTopPosterID = topVisiblePosterID(from: offsets)
+            }
+            .onChange(of: visiblePosterIDs) { _, newIDs in
+                restoreScrollPositionIfNeeded(with: proxy, availableIDs: newIDs)
+            }
+            .background(Color(.systemGroupedBackground))
+            .navigationDestination(item: $selectedPoster) { poster in
+                GalleryPosterDetailView(
+                    poster: poster,
+                    onReport: { _ in },
+                    onDeleted: {
+                        deletedPosterIDs.insert(poster.id)
+                        await onRefresh()
+                    }
+                )
             }
             .fullScreenCover(item: $imageViewer) { viewer in
                 GalleryImageViewer(viewer: viewer)
@@ -356,6 +487,17 @@ private struct GalleryFeedView: View {
                 }
             }
         }
+    }
+
+    /// 加载中和失败空态也放进统一滚动容器里，保证始终可以下拉刷新。
+    @ViewBuilder
+    private func galleryPlaceholderContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack {
+            Spacer(minLength: 120)
+            content()
+            Spacer(minLength: 240)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     /// 首屏空态下是否应该显示中央加载指示器。
@@ -862,11 +1004,6 @@ struct GalleryPosterDetailView: View {
             UserProfileRootView(userID: route.userID)
         }
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("取消") {
-                    dismiss()
-                }
-            }
             if onReport != nil || viewModel.poster.own {
                 ToolbarItem(placement: .topBarTrailing) {
                     GalleryPosterActionMenu(
@@ -1204,17 +1341,24 @@ private struct GalleryCommentBubble: View {
                 }
 
                 HStack(spacing: 10) {
+                    Button(action: onReply) {
+                        Label("回复", systemImage: "arrowshape.turn.up.left")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+
                     Button(action: onLike) {
-                        HStack(spacing: 4) {
+                        Label {
+                            Text("\(comment.likeNum)")
+                                .font(.caption)
+                        } icon: {
                             if isLiking {
                                 ProgressView()
                                     .controlSize(.small)
                             } else {
                                 Image(systemName: comment.like ? "hand.thumbsup.fill" : "hand.thumbsup")
                             }
-
-                            Text("\(comment.likeNum)")
-                                .font(.caption)
                         }
                         .foregroundStyle(comment.like ? Color.orange : Color.secondary)
                     }
@@ -1225,8 +1369,6 @@ private struct GalleryCommentBubble: View {
                 .padding(.top, 2)
             }
         }
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onReply)
     }
 
     private var canOpenUserProfile: Bool {
@@ -1244,12 +1386,14 @@ private struct GalleryCommentBubble: View {
                     .foregroundStyle(.primary)
             )
             .font(.subheadline)
+            .lineSpacing(3)
             .multilineTextAlignment(.leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             Text(comment.text)
                 .font(.subheadline)
                 .foregroundStyle(.primary)
+                .lineSpacing(3)
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -1372,8 +1516,10 @@ private struct GallerySearchView: View {
 ///
 /// Android 虽然最终落到网页，但后端已经提供独立消息接口，因此 iOS 直接走 native list。
 private struct GalleryMessagesView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var viewModel: GalleryMessageViewModel
     @Environment(\.dismiss) private var dismiss
+    @StateObject private var networkObserver = GalleryNetworkObserver()
     @State private var selectedPoster: GalleryPoster?
     @State private var localAlert: LoginAlert?
     private let service = GalleryService()
@@ -1392,6 +1538,12 @@ private struct GalleryMessagesView: View {
                         Label("加载消息失败", systemImage: "bell.badge")
                     } description: {
                         Text(message)
+                    } actions: {
+                        Button("重试") {
+                            Task {
+                                await viewModel.refreshSelectedType()
+                            }
+                        }
                     }
                 } else {
                     List {
@@ -1475,6 +1627,18 @@ private struct GalleryMessagesView: View {
         .task {
             await viewModel.bootstrapIfNeeded()
         }
+        .onChange(of: networkObserver.isReachable) { oldValue, newValue in
+            guard newValue, !oldValue else { return }
+            Task {
+                await retryCurrentTypeIfNeeded()
+            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            guard newPhase == .active else { return }
+            Task {
+                await retryCurrentTypeIfNeeded()
+            }
+        }
         .onChange(of: viewModel.selectedType) { _, newType in
             if viewModel.state(for: newType).status == .idle {
                 Task {
@@ -1482,12 +1646,8 @@ private struct GalleryMessagesView: View {
                 }
             }
         }
-        .sheet(item: $selectedPoster) { poster in
-            NavigationStack {
-                GalleryPosterDetailView(poster: poster)
-            }
-            .presentationDetents([.large])
-            .presentationDragIndicator(.hidden)
+        .navigationDestination(item: $selectedPoster) { poster in
+            GalleryPosterDetailView(poster: poster)
         }
         .alert(item: $viewModel.alert) { alert in
             Alert(
@@ -1507,6 +1667,14 @@ private struct GalleryMessagesView: View {
 
     private var currentState: GalleryMessageListState {
         viewModel.state(for: viewModel.selectedType)
+    }
+
+    /// 网络恢复或回到前台时，如果当前消息分类仍停在失败空态，则自动补拉一次。
+    private func retryCurrentTypeIfNeeded() async {
+        guard networkObserver.isReachable else { return }
+        let state = currentState
+        guard case .failed = state.status, state.items.isEmpty else { return }
+        await viewModel.refreshSelectedType()
     }
 
     private var isInitialLoading: Bool {

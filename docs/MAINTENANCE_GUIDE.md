@@ -118,6 +118,45 @@ xcodebuild \
 - `Schedule/ScheduleWidgetSupport.swift`
 - `BIT101ScheduleWidget/BIT101ScheduleWidget.swift`
 
+### 3.5 覆盖更新与本地数据保留
+
+如果用户只是从旧版本直接升级到新版本，当前实现里下面这些本地数据默认都应保留：
+
+- `Application Support` 里的日程缓存
+- `UserDefaults` 里的设置快照
+- Keychain 里的账号密码
+
+其中和“别人分享的课表”最相关的是日程缓存：
+
+- 分享课表会进入 `ScheduleCache.sharedSchedules`
+- 缓存文件按账号写到 `Application Support/BIT101-iOS/<account>/schedule-cache.json`
+- 升级不会主动清这一层
+
+所以正常覆盖更新后，分享课表理论上仍应存在。
+
+### 3.6 哪些操作会清掉本地数据
+
+下面这些行为才会真的把本地数据打掉：
+
+1. 卸载再安装
+2. 设置页执行“删除所有文稿与数据”
+3. 开发时手动清空 App 沙盒
+4. 某次版本升级引入了破坏性迁移 bug
+
+如果你改动了下面这些内容，发版前最好专门验证一次升级路径：
+
+- `ScheduleCache`
+- `AppSettingsSnapshot`
+- 登录恢复相关本地状态
+- 分享课表导入 / 删除 / 重命名逻辑
+
+最简单的验证方式不是看代码，而是：
+
+1. 用旧版本造一份真实本地数据
+2. 包括主课表、至少一份分享课表、DDL 和设置项
+3. 直接覆盖安装新版本
+4. 真机确认这些数据是否都还在
+
 ## 4. 账号隔离的维护原则
 
 当前项目已经做了账号隔离，但这部分非常容易在后续修改时被破坏。

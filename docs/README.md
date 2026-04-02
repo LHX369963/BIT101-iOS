@@ -50,6 +50,8 @@
   直接看 `FILE_INDEX.md`
 - 想改缓存或账号隔离
   优先看 `STATE_AND_STORAGE.md`
+- 想确认覆盖更新会不会清掉本地数据
+  优先看 `STATE_AND_STORAGE.md` 和 `MAINTENANCE_GUIDE.md`
 - 想排查构建、签名、扩展问题
   优先看 `MAINTENANCE_GUIDE.md`
 - 想继续清理大文件或桥接实现

@@ -1,0 +1,353 @@
+//
+//  CourseDetailViewModel.swift
+//  BIT101-iOS
+//
+//  Created by Codex on 2026-04-02.
+//
+
+import Combine
+import Foundation
+
+private func isCourseDetailCancellation(_ error: Error) -> Bool {
+    if error is CancellationError {
+        return true
+    }
+
+    if let urlError = error as? URLError, urlError.code == .cancelled {
+        return true
+    }
+
+    let nsError = error as NSError
+    return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+}
+
+/// 课程评论输入目标。
+///
+/// 顶层评论直接挂在课程对象下；回复评论则同时记录“主评论”和“当前回复目标”，
+/// 这样既能正确决定提交对象，也能在 UI 上还原“回复谁”的文案。
+enum CourseCommentComposerTarget: Identifiable, Equatable {
+    case course(courseID: Int)
+    case comment(mainComment: GalleryComment, targetComment: GalleryComment)
+
+    var id: String {
+        switch self {
+        case let .course(courseID):
+            return "course-\(courseID)"
+        case let .comment(mainComment, targetComment):
+            return "comment-\(mainComment.id)-\(targetComment.id)"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .course:
+            return "发表评论"
+        case let .comment(_, targetComment):
+            return "回复 @\(targetComment.user.nickname)"
+        }
+    }
+
+    var placeholder: String {
+        switch self {
+        case .course:
+            return "写点什么吧"
+        case let .comment(_, targetComment):
+            return "回复 @\(targetComment.user.nickname)"
+        }
+    }
+
+    var objectID: String {
+        switch self {
+        case let .course(courseID):
+            return "course\(courseID)"
+        case let .comment(mainComment, _):
+            return "comment\(mainComment.id)"
+        }
+    }
+
+    var replyObjectID: String? {
+        switch self {
+        case .course:
+            return nil
+        case let .comment(mainComment, targetComment):
+            guard mainComment.id != targetComment.id else { return nil }
+            return "comment\(targetComment.id)"
+        }
+    }
+
+    var replyUID: Int? {
+        switch self {
+        case .course:
+            return nil
+        case let .comment(mainComment, targetComment):
+            guard mainComment.id != targetComment.id else { return nil }
+            return targetComment.user.id
+        }
+    }
+}
+
+@MainActor
+/// 课程详情状态机。
+final class CourseDetailViewModel: ObservableObject {
+    @Published private(set) var course: CourseDetail?
+    @Published private(set) var status: CourseDetailLoadStatus = .idle
+    @Published private(set) var isLikingCourse = false
+    @Published private(set) var commentState = GalleryCommentState()
+    @Published private(set) var likingCommentIDs: Set<Int> = []
+    @Published private(set) var isSubmittingComment = false
+    @Published var alert: LoginAlert?
+
+    let initialCourse: CourseSummary
+
+    private let service: CourseService
+    private var hasBootstrapped = false
+
+    init(initialCourse: CourseSummary, service: CourseService? = nil) {
+        self.initialCourse = initialCourse
+        self.service = service ?? CourseService()
+    }
+
+    var resolvedName: String {
+        course?.name ?? initialCourse.name
+    }
+
+    var resolvedNumber: String {
+        course?.number ?? initialCourse.number
+    }
+
+    var resolvedTeachersName: String {
+        let value = course?.teachersName ?? initialCourse.teachersName
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var resolvedTeachersNumber: String {
+        let value = course?.teachersNumber ?? initialCourse.teachersNumber
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var resolvedRate: Double {
+        course?.rate ?? initialCourse.rate
+    }
+
+    var resolvedLikeNum: Int {
+        course?.likeNum ?? initialCourse.likeNum
+    }
+
+    var resolvedCommentNum: Int {
+        course?.commentNum ?? initialCourse.commentNum
+    }
+
+    var isCourseLiked: Bool {
+        course?.like ?? false
+    }
+
+    func bootstrapIfNeeded() async {
+        guard !hasBootstrapped else { return }
+        hasBootstrapped = true
+        await refresh()
+    }
+
+    /// 并行刷新课程详情和评论首屏。
+    func refresh() async {
+        let hadCourse = course != nil
+        if !hadCourse {
+            status = .loading
+        }
+        resetCommentStateForRefresh()
+
+        async let courseResult = loadResult { [self] in
+            try await self.service.fetchCourse(id: self.initialCourse.id)
+        }
+        async let commentResult = loadResult { [self] in
+            try await self.service.fetchComments(courseID: self.initialCourse.id, page: nil)
+        }
+
+        handleCourseResult(await courseResult, hadCourse: hadCourse)
+        handleCommentRefreshResult(await commentResult)
+    }
+
+    func loadMoreCommentsIfNeeded(currentComment: GalleryComment?) async {
+        guard let currentComment else { return }
+        guard
+            commentState.status == .loaded,
+            !commentState.isLoadingMore,
+            commentState.canLoadMore,
+            commentState.items.suffix(4).contains(where: { $0.id == currentComment.id })
+        else {
+            return
+        }
+
+        commentState.isLoadingMore = true
+        defer { commentState.isLoadingMore = false }
+
+        let nextPage = commentState.nextPage
+        let result = await loadResult { [self] in
+            try await self.service.fetchComments(courseID: self.initialCourse.id, page: nextPage)
+        }
+
+        switch result {
+        case let .success(comments):
+            commentState.items.append(contentsOf: comments)
+            commentState.nextPage += 1
+            commentState.canLoadMore = !comments.isEmpty
+        case let .failure(error):
+            if isCourseDetailCancellation(error) { return }
+            alert = LoginAlert(title: "加载更多评论失败", message: error.localizedDescription)
+        }
+    }
+
+    func likeCourse() async {
+        guard !isLikingCourse else { return }
+        isLikingCourse = true
+        defer { isLikingCourse = false }
+
+        do {
+            let result = try await service.like(objectID: "course\(initialCourse.id)")
+            if let course {
+                self.course = course.updatingLike(result.like, likeNum: result.likeNum)
+            } else {
+                self.course = fallbackCourseDetail(like: result.like, likeNum: result.likeNum)
+            }
+        } catch {
+            if isCourseDetailCancellation(error) { return }
+            alert = LoginAlert(title: "点赞失败", message: error.localizedDescription)
+        }
+    }
+
+    func likeComment(_ comment: GalleryComment) async {
+        guard !likingCommentIDs.contains(comment.id) else { return }
+        likingCommentIDs.insert(comment.id)
+        defer { likingCommentIDs.remove(comment.id) }
+
+        do {
+            let result = try await service.like(objectID: "comment\(comment.id)")
+            commentState.items = commentState.items.updatingLike(for: comment.id, like: result.like, likeNum: result.likeNum)
+        } catch {
+            if isCourseDetailCancellation(error) { return }
+            alert = LoginAlert(title: "点赞失败", message: error.localizedDescription)
+        }
+    }
+
+    func submitComment(text: String, anonymous: Bool, rate: Int?, target: CourseCommentComposerTarget) async -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            alert = LoginAlert(title: "发送失败", message: "评论不能为空。")
+            return false
+        }
+        if let message = CommunityModeration.validateCommentDraft(text: trimmed) {
+            alert = LoginAlert(title: "内容不合规", message: message)
+            return false
+        }
+        guard !isSubmittingComment else { return false }
+
+        isSubmittingComment = true
+        defer { isSubmittingComment = false }
+
+        do {
+            _ = try await service.createComment(
+                objectID: target.objectID,
+                text: trimmed,
+                replyObjectID: target.replyObjectID,
+                replyUID: target.replyUID,
+                anonymous: anonymous,
+                rate: rate
+            )
+            await refresh()
+            return true
+        } catch {
+            if isCourseDetailCancellation(error) { return false }
+            alert = LoginAlert(title: "发送失败", message: error.localizedDescription)
+            return false
+        }
+    }
+
+    /// 详情首屏还没回来时，点赞仍然需要一个最小可展示的详情快照承接状态。
+    private func fallbackCourseDetail(like: Bool, likeNum: Int) -> CourseDetail {
+        CourseDetail(
+            id: initialCourse.id,
+            name: initialCourse.name,
+            number: initialCourse.number,
+            likeNum: likeNum,
+            commentNum: initialCourse.commentNum,
+            rate: initialCourse.rate,
+            teachersName: initialCourse.teachersName,
+            teachersNumber: initialCourse.teachersNumber,
+            like: like
+        )
+    }
+
+    private func handleCourseResult(_ result: Result<CourseDetail, Error>, hadCourse: Bool) {
+        switch result {
+        case let .success(course):
+            self.course = course
+            status = .loaded
+        case let .failure(error):
+            if isCourseDetailCancellation(error) {
+                if !hadCourse {
+                    status = .idle
+                }
+                return
+            }
+
+            if hadCourse {
+                status = .loaded
+                alert = LoginAlert(title: "刷新课程详情失败", message: error.localizedDescription)
+                return
+            }
+
+            status = .failed(error.localizedDescription)
+            alert = LoginAlert(title: "加载课程详情失败", message: error.localizedDescription)
+        }
+    }
+
+    private func handleCommentRefreshResult(_ result: Result<[GalleryComment], Error>) {
+        switch result {
+        case let .success(comments):
+            commentState.items = comments
+            commentState.status = .loaded
+            commentState.nextPage = 1
+            commentState.canLoadMore = !comments.isEmpty
+            commentState.isLoadingMore = false
+        case let .failure(error):
+            if isCourseDetailCancellation(error) {
+                commentState.status = .idle
+                commentState.isLoadingMore = false
+                return
+            }
+
+            commentState.status = .failed(error.localizedDescription)
+            commentState.canLoadMore = false
+            commentState.isLoadingMore = false
+            alert = LoginAlert(title: "加载评论失败", message: error.localizedDescription)
+        }
+    }
+
+    private func resetCommentStateForRefresh() {
+        commentState.status = .loading
+        commentState.items = []
+        commentState.isLoadingMore = false
+        commentState.nextPage = 0
+        commentState.canLoadMore = true
+    }
+
+    private func loadResult<T>(_ operation: @escaping () async throws -> T) async -> Result<T, Error> {
+        do {
+            return .success(try await operation())
+        } catch {
+            return .failure(error)
+        }
+    }
+}
+
+private extension Array where Element == GalleryComment {
+    func updatingLike(for commentID: Int, like: Bool, likeNum: Int) -> [GalleryComment] {
+        map { comment in
+            let updatedSub = comment.sub.updatingLike(for: commentID, like: like, likeNum: likeNum)
+            let updated = comment.replacingSubComments(updatedSub)
+            if updated.id == commentID {
+                return updated.updatingLike(like, likeNum: likeNum)
+            }
+            return updated
+        }
+    }
+}

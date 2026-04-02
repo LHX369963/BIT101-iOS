@@ -16,6 +16,10 @@ private let scheduleWidgetCampusNetworkMessage = "请在校园网环境下，获
 private let scheduleWidgetLoginMessage = "请登录"
 /// 当后续没有课程时统一使用的 widget 空态提示。
 private let scheduleWidgetRestMessage = "课已经上完，好好休息"
+/// 当前课在 widget 中继续占据首位的最长时长。
+///
+/// 超过这段时间后，如果后面还有课，就优先展示“下一节”，给 WidgetKit 的非准点刷新留出余量。
+private let scheduleWidgetCurrentCourseDisplayDuration: TimeInterval = 5 * 60
 
 /// 课表小组件与主 App 共享的 App Group 标识。
 ///
@@ -91,10 +95,15 @@ private struct ScheduleWidgetOccurrence: Identifiable {
     let teacher: String
     let startDate: Date
     let endDate: Date
+    let displayUntilDate: Date
 
     var isCurrent: Bool {
         let now = Date()
-        return startDate <= now && now < endDate
+        return startDate <= now && now < displayUntilDate
+    }
+
+    var countdownTargetDate: Date {
+        isCurrent ? displayUntilDate : startDate
     }
 
     var rangeText: String {
@@ -325,7 +334,8 @@ private struct ScheduleWidgetProvider: TimelineProvider {
                     classroom: "理教201",
                     teacher: "张老师",
                     startDate: Date().addingTimeInterval(20 * 60),
-                    endDate: Date().addingTimeInterval(110 * 60)
+                    endDate: Date().addingTimeInterval(110 * 60),
+                    displayUntilDate: Date().addingTimeInterval(110 * 60)
                 ),
                 ScheduleWidgetOccurrence(
                     id: "preview-later",
@@ -333,7 +343,8 @@ private struct ScheduleWidgetProvider: TimelineProvider {
                     classroom: "文萃302",
                     teacher: "李老师",
                     startDate: Date().addingTimeInterval(180 * 60),
-                    endDate: Date().addingTimeInterval(260 * 60)
+                    endDate: Date().addingTimeInterval(260 * 60),
+                    displayUntilDate: Date().addingTimeInterval(260 * 60)
                 ),
             ],
             message: nil
@@ -345,7 +356,7 @@ private struct ScheduleWidgetProvider: TimelineProvider {
         completion(loadEntry())
     }
 
-    /// 构造一条时间线；下一次刷新时间取决于最近课程的开始/结束节点。
+    /// 构造一条时间线；下一次刷新时间取决于最近课程的开始/切换节点。
     func getTimeline(in context: Context, completion: @escaping (Timeline<ScheduleWidgetEntry>) -> Void) {
         let entry = loadEntry()
         let refreshDate = nextRefreshDate(for: entry)
@@ -413,15 +424,21 @@ private struct ScheduleWidgetProvider: TimelineProvider {
         return try? decoder.decode(ScheduleWidgetSnapshot.self, from: data)
     }
 
-    /// 把精简快照展开成“当前时刻之后的课程实例”。
+    /// 把精简快照展开成“当前时刻仍应展示的课程实例”。
+    ///
+    /// 规则是：
+    /// - 开课前正常显示这节课
+    /// - 开课后前 5 分钟仍允许显示“当前课”
+    /// - 超过 5 分钟后，如果后面还有课，就直接切到“下一节”
+    /// - 如果这已经是最后一节课，则继续显示到下课
     private func buildUpcomingOccurrences(
         from snapshot: ScheduleWidgetSnapshot,
         firstDay: Date
     ) -> [ScheduleWidgetOccurrence] {
-        let slotMap = Dictionary(uniqueKeysWithValues: snapshot.timeTable.map { ($0.id, $0) })
         let now = Date()
+        let slotMap = Dictionary(uniqueKeysWithValues: snapshot.timeTable.map { ($0.id, $0) })
 
-        return snapshot.courses
+        let rawOccurrences = snapshot.courses
             .flatMap { course in
                 course.weeks.compactMap { week -> ScheduleWidgetOccurrence? in
                     guard
@@ -440,7 +457,8 @@ private struct ScheduleWidgetProvider: TimelineProvider {
                         classroom: Self.normalizeClassroom(course.classroom),
                         teacher: course.teacher,
                         startDate: startDate,
-                        endDate: endDate
+                        endDate: endDate,
+                        displayUntilDate: endDate
                     )
                 }
             }
@@ -450,15 +468,43 @@ private struct ScheduleWidgetProvider: TimelineProvider {
                 }
                 return lhs.title < rhs.title
             }
+
+        return rawOccurrences.enumerated().compactMap { index, occurrence in
+            let hasLaterOccurrence = rawOccurrences.indices.contains(index + 1)
+            let displayUntilDate: Date
+
+            if hasLaterOccurrence {
+                displayUntilDate = min(
+                    occurrence.endDate,
+                    occurrence.startDate.addingTimeInterval(scheduleWidgetCurrentCourseDisplayDuration)
+                )
+            } else {
+                displayUntilDate = occurrence.endDate
+            }
+
+            guard displayUntilDate > now else {
+                return nil
+            }
+
+            return ScheduleWidgetOccurrence(
+                id: occurrence.id,
+                title: occurrence.title,
+                classroom: occurrence.classroom,
+                teacher: occurrence.teacher,
+                startDate: occurrence.startDate,
+                endDate: occurrence.endDate,
+                displayUntilDate: displayUntilDate
+            )
+        }
     }
 
     /// 计算 widget 下一次需要刷新的时间点。
     ///
-    /// 优先在最近一节课的开始/结束节点刷新；没有课程时再走兜底刷新。
+    /// 优先在最近一节课的开始/切换节点刷新；没有课程时再走兜底刷新。
     private func nextRefreshDate(for entry: ScheduleWidgetEntry) -> Date {
         let now = Date()
         let candidates = entry.nextOccurrences
-            .flatMap { [$0.startDate, $0.endDate] }
+            .flatMap { [$0.startDate, $0.displayUntilDate] }
             .filter { $0 > now.addingTimeInterval(30) }
             .sorted()
 
@@ -852,7 +898,7 @@ private struct ScheduleWidgetEntryView: View {
 
     /// 锁屏圆形组件里展示的分钟数倒计时。
     private func circularCountdownText(for occurrence: ScheduleWidgetOccurrence) -> String {
-        let target = occurrence.isCurrent ? occurrence.endDate : occurrence.startDate
+        let target = occurrence.countdownTargetDate
         let seconds = max(0, Int(target.timeIntervalSince(Date())))
         let minutes = max(1, Int(ceil(Double(seconds) / 60.0)))
         return "\(minutes)分"

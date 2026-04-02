@@ -11,12 +11,28 @@ import UIKit
 /// 应用底部 Tab 的稳定标识。
 ///
 /// 页面设置和启动默认页都依赖这个枚举持久化。
-enum AppTab: String, CaseIterable, Identifiable, Codable {
+enum AppTab: String, Identifiable, Codable {
     case schedule
+    /// 仅用于兼容旧版本持久化出来的页面顺序和默认页配置。
+    ///
+    /// 课程入口现已并入“成绩”页顶部的二级栏位，不再作为独立底部 tab 展示。
+    case course
     case map
     case gallery
+    /// 仅用于兼容旧版本持久化出来的页面顺序和默认页配置。
+    ///
+    /// 文章入口现已并入“话廊”页顶部的二级栏位，不再作为独立底部 tab 展示。
+    case paper
     case score = "home"
     case mine
+
+    static let allCases: [AppTab] = [
+        .schedule,
+        .map,
+        .gallery,
+        .score,
+        .mine
+    ]
 
     /// 供 `TabView` 和设置持久化使用的稳定标识。
     var id: String { rawValue }
@@ -26,12 +42,16 @@ enum AppTab: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .schedule:
             return "日程"
+        case .course:
+            return "课程"
         case .map:
             return "地图"
         case .score:
-            return "成绩"
+            return "学业"
         case .gallery:
             return "话廊"
+        case .paper:
+            return "文章"
         case .mine:
             return "我的"
         }
@@ -42,12 +62,16 @@ enum AppTab: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .schedule:
             return "calendar"
+        case .course:
+            return "books.vertical"
         case .map:
             return "map"
         case .score:
             return "chart.bar.doc.horizontal"
         case .gallery:
             return "bubble.left.and.bubble.right"
+        case .paper:
+            return "doc.text"
         case .mine:
             return "person.crop.circle"
         }
@@ -58,12 +82,16 @@ enum AppTab: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .schedule:
             return .indigo
+        case .course:
+            return .teal
         case .map:
             return .green
         case .score:
             return .pink
         case .gallery:
             return .orange
+        case .paper:
+            return .brown
         case .mine:
             return .blue
         }
@@ -74,14 +102,20 @@ enum AppTab: String, CaseIterable, Identifiable, Codable {
 ///
 /// 壳层只关心两件事：按照设置中心决定展示哪些 tab，以及把退出登录回调继续往下传。
 struct AppShellView: View {
-    private static let startupNoticeTitle = "1.2.1版本更新"
+    private static let startupNoticeTitle = "1.3.0版本更新"
     private static let startupNoticeBody = """
-    1、bugfix&设计语言统一
-    2、移植到了mac端
-    3、优化发帖体验
-    4、支持分享课表和导入分享
-    在课表视图上下滑动即可切换自己的课表与接分享的课表
+    1、bugfix
+    2、增加话廊-文章页面
+    3、增加学业-课程界面
+    4、使用体验优化
     """
+    private static let widgetUsageGuideTitle = "非常有用的几个用法"
+    private static let widgetUsageGuideBody = """
+    推荐在锁屏添加锁屏小组件（如果你习惯使用息屏显示）。
+    桌面小组件也很实用，可以尝试一波。
+    """
+    private static let linuxDoThanksTitle = "特别鸣谢 LINUX DO"
+    private static let linuxDoThanksBody = "特别感谢 LINUX DO（L站）以及佬友们。这个 App 的诞生，离不开他们提供的免费 tokens 与无私的支持。L站倡导“真诚、友善、团结、专业，共建你我引以为荣之社区。”某种意义上，BIT101 也是在这样的氛围里，被一点点推出来的。\n\n如果你也想加入，可以向开发者发送邮件索要 L 站邀请码：systemd@linux.do"
 
     let studentID: String
     let onLogout: () -> Void
@@ -92,8 +126,11 @@ struct AppShellView: View {
     @State private var selectedTab: AppTab = .schedule
     @State private var isShowingGalleryEULA = false
     @State private var isShowingStartupNotice = false
+    @State private var isShowingWidgetUsageGuide = false
+    @State private var isShowingLinuxDoThanksNotice = false
     @State private var isShowingScheduleNotificationPrompt = false
     @State private var requestedScheduleSection: ScheduleSection?
+    @State private var requestedPaperID: Int?
 
     /// 登录后的应用壳层主体。
     ///
@@ -109,12 +146,16 @@ struct AppShellView: View {
                     switch tab {
                     case .schedule:
                         ScheduleRootView(requestedSection: $requestedScheduleSection)
+                    case .course:
+                        ScoreRootView()
                     case .map:
                         CampusMapScreen()
                     case .score:
                         ScoreRootView()
                     case .gallery:
-                        GalleryRootView()
+                        GalleryRootView(requestedPaperID: $requestedPaperID)
+                    case .paper:
+                        GalleryRootView(requestedPaperID: $requestedPaperID)
                     case .mine:
                         MineRootView(fallbackStudentID: studentID, onLogout: onLogout)
                     }
@@ -139,15 +180,36 @@ struct AppShellView: View {
                 }
             )
         }
-        .sheet(isPresented: $isShowingStartupNotice) {
-            StartupNoticeSheet(
-                title: Self.startupNoticeTitle,
-                bodyText: Self.startupNoticeBody
-            ) {
+        .alert(Self.startupNoticeTitle, isPresented: $isShowingStartupNotice) {
+            Button("确定") {
                 settings.markCurrentStartupNoticeSeen()
-                isShowingStartupNotice = false
+                presentWidgetUsageGuideIfNeeded()
+            }
+        } message: {
+            Text(Self.startupNoticeBody)
+        }
+        .alert(Self.widgetUsageGuideTitle, isPresented: $isShowingWidgetUsageGuide) {
+            Button("知道了") {
+                settings.markCurrentWidgetUsageGuideSeen()
                 refreshScheduleNotificationPromptIfNeeded()
             }
+        } message: {
+            Text(Self.widgetUsageGuideBody)
+        }
+        .alert(Self.linuxDoThanksTitle, isPresented: $isShowingLinuxDoThanksNotice) {
+            Button("知道了") {
+                settings.markLinuxDoThanksNoticeShown()
+                refreshScheduleNotificationPromptIfNeeded()
+            }
+            Button("发送邮件") {
+                settings.markLinuxDoThanksNoticeShown()
+                if let url = URL(string: "mailto:systemd@linux.do") {
+                    openURL(url)
+                }
+                refreshScheduleNotificationPromptIfNeeded()
+            }
+        } message: {
+            Text(Self.linuxDoThanksBody)
         }
         .onAppear {
             let initial = settings.visibleTabs.contains(settings.homeTab) ? settings.homeTab : (settings.visibleTabs.first ?? .schedule)
@@ -156,6 +218,10 @@ struct AppShellView: View {
             }
             if settings.shouldShowCurrentStartupNotice {
                 isShowingStartupNotice = true
+            } else if !settings.hasAcceptedCurrentWidgetUsageGuide {
+                isShowingWidgetUsageGuide = true
+            } else if settings.shouldShowLinuxDoThanksNotice {
+                isShowingLinuxDoThanksNotice = true
             } else {
                 refreshScheduleNotificationPromptIfNeeded()
             }
@@ -211,6 +277,14 @@ struct AppShellView: View {
             if routeTail == "courses" {
                 requestedScheduleSection = .courses
             }
+            return
+        }
+
+        if routeHead == "paper" {
+            let rawID = url.host == nil ? pathComponents.dropFirst().first : pathComponents.first
+            guard let rawID, let paperID = Int(rawID) else { return }
+            selectedTab = .gallery
+            requestedPaperID = paperID
         }
     }
 
@@ -231,10 +305,31 @@ struct AppShellView: View {
                     return
                 }
 
+                if !settings.hasAcceptedCurrentWidgetUsageGuide {
+                    isShowingWidgetUsageGuide = true
+                    return
+                }
+
+                if settings.shouldShowLinuxDoThanksNotice {
+                    isShowingLinuxDoThanksNotice = true
+                    return
+                }
+
                 if authorizationState != .allowed {
                     presentScheduleNotificationPromptIfNeeded()
                 }
             }
+        }
+    }
+
+    /// 如果用户还没看过小组件提示，就在进入壳层后先展示。
+    private func presentWidgetUsageGuideIfNeeded() {
+        if !settings.hasAcceptedCurrentWidgetUsageGuide {
+            isShowingWidgetUsageGuide = true
+        } else if settings.shouldShowLinuxDoThanksNotice {
+            isShowingLinuxDoThanksNotice = true
+        } else {
+            refreshScheduleNotificationPromptIfNeeded()
         }
     }
 
@@ -316,44 +411,6 @@ struct AppShellView: View {
             return topViewController(from: presented)
         }
         return viewController
-    }
-}
-
-/// 启动后展示的版本更新说明。
-///
-/// 这里改成独立 sheet，而不是系统 alert，是为了保证正文左右留白完全对称；
-/// 系统 alert 对多行正文的内边距和换行控制较弱，长文本时视觉上容易显得左右不齐。
-private struct StartupNoticeSheet: View {
-    let title: String
-    let bodyText: String
-    let onConfirm: () -> Void
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 20) {
-                ScrollView {
-                    Text(bodyText)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .lineSpacing(5)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 18)
-                        .background(
-                            Color(.secondarySystemGroupedBackground),
-                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        )
-                }
-
-                Button("确定", action: onConfirm)
-                    .buttonStyle(.borderedProminent)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .padding(20)
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-        }
-        .interactiveDismissDisabled()
-        .presentationDetents([.medium])
-        .presentationDragIndicator(.hidden)
     }
 }
 

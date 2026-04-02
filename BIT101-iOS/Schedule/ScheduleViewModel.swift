@@ -257,7 +257,7 @@ final class ScheduleViewModel: ObservableObject {
     }
 
     /// 同步乐学 DDL，并保留本地手动项目和完成状态。
-    func syncDDL() async {
+    func syncDDL(showSuccessNotice: Bool = true) async {
         isSyncingDDL = true
         defer { isSyncingDDL = false }
 
@@ -271,6 +271,12 @@ final class ScheduleViewModel: ObservableObject {
             cache.lexueCalendarURL = payload.url
             cache.ddlEvents = (manualEvents + payload.events).sorted { $0.dueAt < $1.dueAt }
             persist()
+            if showSuccessNotice {
+                notice = ScheduleNotice(
+                    title: "DDL 同步成功",
+                    message: payload.events.isEmpty ? "已更新成功，当前没有乐学日程。" : "已更新成功，共同步 \(payload.events.count) 条乐学日程。"
+                )
+            }
         } catch {
             notice = ScheduleNotice(title: "DDL 同步失败", message: error.localizedDescription)
         }
@@ -279,13 +285,16 @@ final class ScheduleViewModel: ObservableObject {
     /// 强制重新抓取乐学日历订阅地址。
     ///
     /// 主要用在订阅链接失效或用户主动要求重置时。
-    func refreshLexueCalendarURL() async {
+    func refreshLexueCalendarURL(showSuccessNotice: Bool = true) async {
         isSyncingDDL = true
         defer { isSyncingDDL = false }
 
         do {
             cache.lexueCalendarURL = try await service.refreshLexueCalendarURL()
             persist()
+            if showSuccessNotice {
+                notice = ScheduleNotice(title: "订阅链接更新成功", message: "已重新获取乐学订阅链接。")
+            }
         } catch {
             notice = ScheduleNotice(title: "订阅链接获取失败", message: error.localizedDescription)
         }

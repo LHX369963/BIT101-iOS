@@ -201,9 +201,9 @@ struct BIT101_iOSApp: App {
         }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
-                // 应用重新回到前台时做一次兜底刷新，避免后台停留期间
-                // 课表提醒状态与实际时间脱节。
-                refreshScheduleExternalDisplays(trigger: "scene_active", syncWidgetSnapshot: false)
+                // 应用重新回到前台时，同时补做一次 widget 快照导出与时间线刷新。
+                // 否则即便用户主动打开 app，桌面/锁屏小组件也可能继续沿用后台停留期间的旧条目。
+                refreshScheduleExternalDisplays(trigger: "scene_active", syncWidgetSnapshot: true)
             }
         }
     }

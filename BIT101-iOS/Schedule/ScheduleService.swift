@@ -516,8 +516,8 @@ struct ScheduleService {
                 continue
             }
 
-            let description = values["DESCRIPTION"] ?? ""
-            let course = values["CATEGORIES"] ?? ""
+            let description = (values["DESCRIPTION"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let course = (values["CATEGORIES"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let text = [course, description]
                 .filter { !$0.isEmpty }
                 .joined(separator: "\n\n")

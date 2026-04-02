@@ -1,6 +1,23 @@
 import Combine
 import SwiftUI
 
+/// 统一生成“左右轻扫切换分区”的横向手势。
+///
+/// 与话题页保持同一套判断条件：
+/// - 横向位移大于纵向位移
+/// - 横向位移达到最小触发阈值
+/// - 左滑记作 `+1`，右滑记作 `-1`
+private func makeHorizontalSwitchGesture(onStep: @escaping (Int) -> Void) -> some Gesture {
+    DragGesture(minimumDistance: 24, coordinateSpace: .local)
+        .onEnded { value in
+            let horizontal = value.translation.width
+            let vertical = value.translation.height
+
+            guard abs(horizontal) > abs(vertical), abs(horizontal) >= 56 else { return }
+            onStep(horizontal < 0 ? 1 : -1)
+        }
+}
+
 /// 成绩页本地筛选偏好快照。
 ///
 /// 按账号保存上一次的学期与课程性质筛选，避免每次重进页面都重新全选。
@@ -230,16 +247,107 @@ final class ScoreViewModel: ObservableObject {
     }
 }
 
+/// “成绩”底部页内部的一级内容分区。
+///
+/// 课程模块并入后，底部栏只保留“成绩”一个入口，
+/// 再通过这里的顶部栏在“成绩 / 课程”之间切换。
+private enum ScoreSurface: String, CaseIterable, Identifiable {
+    case score
+    case course
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .score:
+            return "成绩"
+        case .course:
+            return "课程"
+        }
+    }
+}
+
 /// 原生成绩查询主页。
 ///
-/// 展示学期/种类筛选、统计信息和成绩列表。
+/// 负责承载“成绩 / 课程”的顶部切换。
 struct ScoreRootView: View {
-    @StateObject private var viewModel = ScoreViewModel()
-    @State private var selectedRow: ScoreRow?
+    @StateObject private var scoreViewModel = ScoreViewModel()
+    @StateObject private var courseViewModel = CourseListViewModel()
+    @State private var selectedSurface: ScoreSurface = .score
 
-    /// 成绩主页主体。
+    var body: some View {
+        ZStack {
+            switch selectedSurface {
+            case .score:
+                ScoreListPage(viewModel: scoreViewModel)
+                    .simultaneousGesture(surfaceSwitchGesture)
+                    .transition(.opacity)
+            case .course:
+                CoursePageContent(viewModel: courseViewModel)
+                    .simultaneousGesture(surfaceSwitchGesture)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: selectedSurface)
+        .safeAreaInset(edge: .top) {
+            Picker("成绩内容", selection: surfaceSelection) {
+                ForEach(ScoreSurface.allCases) { surface in
+                    Text(surface.title).tag(surface)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
+            .background(Color(.systemGroupedBackground))
+        }
+        .toolbar(.hidden, for: .navigationBar)
+    }
+
+    /// 顶部 segmented 的受控绑定。
     ///
-    /// 页面固定分成“筛选 -> 统计 -> 列表”三段，保持与 Android/网页的心智模型一致。
+    /// 统一把点击切换和滑动切换都收束到同一条动画路径里。
+    private var surfaceSelection: Binding<ScoreSurface> {
+        Binding(
+            get: { selectedSurface },
+            set: { newSurface in
+                switchSurface(to: newSurface)
+            }
+        )
+    }
+
+    /// 当前页的左右轻扫切换手势。
+    private var surfaceSwitchGesture: some Gesture {
+        makeHorizontalSwitchGesture(onStep: switchSurface)
+    }
+
+    /// 把当前分区切到相邻页。
+    private func switchSurface(step: Int) {
+        let allSurfaces = ScoreSurface.allCases
+        guard let currentIndex = allSurfaces.firstIndex(of: selectedSurface) else { return }
+
+        let nextIndex = currentIndex + step
+        guard allSurfaces.indices.contains(nextIndex) else { return }
+
+        switchSurface(to: allSurfaces[nextIndex])
+    }
+
+    /// 切换到指定分区，并统一施加渐变动画。
+    private func switchSurface(to surface: ScoreSurface) {
+        guard surface != selectedSurface else { return }
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            selectedSurface = surface
+        }
+    }
+}
+
+/// 成绩列表子页。
+///
+/// 保留原有“筛选 -> 统计 -> 列表”结构，只是被合并页托管。
+private struct ScoreListPage: View {
+    @ObservedObject var viewModel: ScoreViewModel
+
     var body: some View {
         Group {
             switch viewModel.state {
@@ -261,7 +369,7 @@ struct ScoreRootView: View {
                 .background(Color(.systemGroupedBackground))
             case .loaded:
                 List {
-                    Section {
+                    Section("筛选") {
                         NavigationLink {
                             ScoreFilterPage(
                                 title: "学期筛选",
@@ -308,8 +416,8 @@ struct ScoreRootView: View {
                             .frame(maxWidth: .infinity)
                         } else {
                             ForEach(viewModel.filteredRows) { row in
-                                Button {
-                                    selectedRow = row
+                                NavigationLink {
+                                    ScoreDetailView(row: row)
                                 } label: {
                                     ScoreRowCard(row: row)
                                 }
@@ -325,29 +433,8 @@ struct ScoreRootView: View {
                 }
             }
         }
-        .toolbar(.hidden, for: .navigationBar)
         .task {
             await viewModel.bootstrapIfNeeded()
-        }
-        .sheet(item: $selectedRow) { row in
-            NavigationStack {
-                List {
-                    ForEach(Array(row.values.enumerated()), id: \.offset) { _, pair in
-                        if !pair.value.isEmpty {
-                            LabeledContent(pair.key, value: pair.value)
-                        }
-                    }
-                }
-                .navigationTitle(row.courseName.isEmpty ? "成绩详情" : row.courseName)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("取消") {
-                            selectedRow = nil
-                        }
-                    }
-                }
-            }
         }
         .alert(item: $viewModel.alert) { alert in
             Alert(title: Text(alert.title), message: Text(alert.message), dismissButton: .default(Text("知道了")))
@@ -446,7 +533,7 @@ private struct ScoreRowCard: View {
                     ScoreFixedColumnItem(
                         text: row.courseType.isEmpty ? "-" : row.courseType,
                         ratio: 0.3,
-                        font: .subheadline,
+                        font: .caption,
                         color: .secondary,
                         alignment: .trailing
                     ),
@@ -470,6 +557,128 @@ private struct ScoreRowCard: View {
         guard !trimmed.isEmpty else { return "-" }
         guard let value = Double(trimmed) else { return trimmed }
         return value.formatted(.number.precision(.fractionLength(2)))
+    }
+}
+
+/// 成绩详情页。
+///
+/// 由列表直接 push 进入，使用平铺信息流替代旧的抽屉式详情。
+private struct ScoreDetailView: View {
+    let row: ScoreRow
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                summarySection
+                Divider()
+                detailSection
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 18)
+            .padding(.bottom, 24)
+        }
+        .background(Color(.systemGroupedBackground))
+        .navigationTitle("成绩详情")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var summarySection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(row.courseName.isEmpty ? "未命名课程" : row.courseName)
+                .font(.title3.weight(.bold))
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 18) {
+                Text("成绩 \(row.score.isEmpty ? "-" : row.score)")
+                Text("均分 \(formattedAverageScore)")
+                Text(formattedCredit)
+            }
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 8) {
+                ScoreDetailMetaRow(title: "课程号", value: row.courseNumber)
+                ScoreDetailMetaRow(title: "学期", value: row.term)
+                ScoreDetailMetaRow(title: "课程性质", value: row.courseType)
+            }
+            .font(.subheadline)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var detailSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("详细信息")
+                .font(.headline)
+
+            if remainingFields.isEmpty {
+                Text("暂无更多信息")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(remainingFields.enumerated()), id: \.offset) { index, field in
+                        VStack(spacing: 0) {
+                            ScoreDetailFieldRow(field: field)
+
+                            if index != remainingFields.count - 1 {
+                                Divider()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var remainingFields: [ScoreField] {
+        let hiddenKeys: Set<String> = ["课程名称", "成绩", "平均分", "学分", "课程编号", "开课学期", "课程性质"]
+        return row.values.filter { field in
+            let value = field.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !value.isEmpty && !hiddenKeys.contains(field.key)
+        }
+    }
+
+    private var formattedCredit: String {
+        let trimmed = row.creditText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "学分 -" }
+        return "学分 \(trimmed)"
+    }
+
+    private var formattedAverageScore: String {
+        let trimmed = row.averageScore.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "-" }
+        guard let value = Double(trimmed) else { return trimmed }
+        return value.formatted(.number.precision(.fractionLength(2)))
+    }
+}
+
+private struct ScoreDetailMetaRow: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        LabeledContent(title, value: value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "-" : value)
+    }
+}
+
+private struct ScoreDetailFieldRow: View {
+    let field: ScoreField
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Text(field.key)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: 84, alignment: .leading)
+
+            Text(field.value)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 12)
     }
 }
 

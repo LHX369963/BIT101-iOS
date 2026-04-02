@@ -530,6 +530,8 @@ private struct ThemeSettingsPage: View {
 ///
 /// 这里既承载“数据同步入口”，也承载“课表显示项”和“灵动岛提醒”相关配置。
 private struct CalendarSettingsPage: View {
+    @ObservedObject private var appSettings = AppSettingsStore.shared
+
     private struct ExportedScheduleCode: Identifiable {
         let id = UUID()
         let code: String
@@ -558,6 +560,9 @@ private struct CalendarSettingsPage: View {
     @State private var isShowingCustomSchedules = false
     @State private var isShowingLiveActivityLeadMinutesPicker = false
     @State private var isShowingEmptyScheduleExportConfirmation = false
+    @State private var isShowingSharedScheduleImportGuide = false
+    @State private var isShowingLiveActivityExperimentalWarning = false
+    @State private var shouldOpenImportSheetAfterGuide = false
     @State private var exportedScheduleCode: ExportedScheduleCode?
     @State private var importDraft: ScheduleImportDraft?
     @State private var renamingScheduleTarget: RenamingScheduleTarget?
@@ -599,7 +604,7 @@ private struct CalendarSettingsPage: View {
                 }
 
                 Button("导入课表") {
-                    importDraft = ScheduleImportDraft()
+                    presentImportGuideIfNeeded(openImportAfterGuide: true)
                 }
             }
 
@@ -641,9 +646,15 @@ private struct CalendarSettingsPage: View {
                 Toggle("显示节次分割线", isOn: Binding(get: { viewModel.cache.showDivider }, set: viewModel.setShowDivider))
                 Toggle("显示当前时间线", isOn: Binding(get: { viewModel.cache.showCurrentTime }, set: viewModel.setShowCurrentTime))
                 Toggle("显示考试安排", isOn: Binding(get: { viewModel.cache.showExamInfo }, set: viewModel.setShowExamInfo))
-                Toggle("显示灵动岛提醒", isOn: Binding(
+                Toggle("显示灵动岛提醒（实验）", isOn: Binding(
                     get: { viewModel.cache.showCourseLiveActivityReminder },
-                    set: viewModel.setShowCourseLiveActivityReminder
+                    set: { enabled in
+                        if enabled {
+                            isShowingLiveActivityExperimentalWarning = true
+                        } else {
+                            viewModel.setShowCourseLiveActivityReminder(false)
+                        }
+                    }
                 ))
                 Button {
                     guard viewModel.cache.showCourseLiveActivityReminder else { return }
@@ -664,6 +675,12 @@ private struct CalendarSettingsPage: View {
                 .opacity(viewModel.cache.showCourseLiveActivityReminder ? 1 : 0.45)
             } header: {
                 Text("显示设置")
+            }
+
+            Section("帮助") {
+                Button("重新观看提示") {
+                    presentImportGuideIfNeeded(openImportAfterGuide: false, forceShow: true)
+                }
             }
         }
         .task {
@@ -730,6 +747,28 @@ private struct CalendarSettingsPage: View {
         } message: {
             Text("你尚未获取课表，仍要分享？")
         }
+        .alert("实验性功能提醒", isPresented: $isShowingLiveActivityExperimentalWarning) {
+            Button("取消", role: .cancel) {}
+            Button("继续打开") {
+                viewModel.setShowCourseLiveActivityReminder(true)
+            }
+        } message: {
+            Text("开发者和 AI 尚未完全摸清楚灵动岛的运作机理和唤醒条件。虽然做了多重兜底，但仍不能保证每节课都能按时通知。继续打开视为已知悉此风险。")
+        }
+        .alert("导入分享课表提示", isPresented: $isShowingSharedScheduleImportGuide) {
+            Button("知道了") {
+                appSettings.markSharedScheduleImportGuideSeen()
+                if shouldOpenImportSheetAfterGuide {
+                    importDraft = ScheduleImportDraft()
+                }
+                shouldOpenImportSheetAfterGuide = false
+            }
+            Button("取消", role: .cancel) {
+                shouldOpenImportSheetAfterGuide = false
+            }
+        } message: {
+            Text("课表可以单击以改名，左滑以删除，在日程界面上下滑可循环切换，所有小组件以自己的课表作为数据源。")
+        }
         .alert(item: $viewModel.notice) { notice in
             Alert(
                 title: Text(notice.title),
@@ -764,6 +803,17 @@ private struct CalendarSettingsPage: View {
             exportedScheduleCode = ExportedScheduleCode(code: code)
         } catch {
             viewModel.notice = ScheduleNotice(title: "导出失败", message: error.localizedDescription)
+        }
+    }
+
+    /// 首次导入前先展示一次使用提示；后续只在用户主动点“重新观看提示”时再展示。
+    private func presentImportGuideIfNeeded(openImportAfterGuide: Bool, forceShow: Bool = false) {
+        shouldOpenImportSheetAfterGuide = openImportAfterGuide
+
+        if forceShow || !appSettings.hasSeenSharedScheduleImportGuide {
+            isShowingSharedScheduleImportGuide = true
+        } else if openImportAfterGuide {
+            importDraft = ScheduleImportDraft()
         }
     }
 
@@ -1011,27 +1061,160 @@ private struct ScheduleRenameSheet: View {
 /// 这页只负责 DDL 同步和显示窗口配置，不再混入新增/编辑入口。
 private struct DDLSettingsPage: View {
     @StateObject private var viewModel = ScheduleViewModel()
+    @State private var pickerRoute: DDLSettingsNumberPickerRoute?
 
     var body: some View {
-        Form {
+        List {
             Section("数据设置") {
-                Button("重新获取订阅链接") {
+                Button {
                     Task { await viewModel.refreshLexueCalendarURL() }
+                } label: {
+                    DDLSettingsActionRow(
+                        title: "重新获取订阅链接"
+                    )
                 }
+                .buttonStyle(.plain)
                 .disabled(viewModel.isSyncingDDL)
 
-                Button("重新拉取乐学日程") {
+                Button {
                     Task { await viewModel.syncDDL() }
+                } label: {
+                    DDLSettingsActionRow(
+                        title: "重新拉取乐学日程"
+                    )
                 }
+                .buttonStyle(.plain)
                 .disabled(viewModel.isSyncingDDL)
             }
 
             Section("显示设置") {
-                Stepper("变色天数 \(viewModel.beforeDay)", value: Binding(get: { viewModel.beforeDay }, set: viewModel.setDDLBeforeDay), in: 0 ... 30)
-                Stepper("滞留天数 \(viewModel.afterDay)", value: Binding(get: { viewModel.afterDay }, set: viewModel.setDDLAfterDay), in: 0 ... 30)
+                Button {
+                    pickerRoute = .beforeDay
+                } label: {
+                    DDLSettingsActionRow(
+                        title: "变色天数",
+                        value: "\(viewModel.beforeDay) 天"
+                    )
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    pickerRoute = .afterDay
+                } label: {
+                    DDLSettingsActionRow(
+                        title: "滞留天数",
+                        value: "\(viewModel.afterDay) 天"
+                    )
+                }
+                .buttonStyle(.plain)
             }
         }
+        .listStyle(.insetGrouped)
         .task { await viewModel.loadIfNeeded() }
+        .sheet(item: $pickerRoute) { route in
+            switch route {
+            case .beforeDay:
+                DDLSettingsNumberPickerSheet(
+                    title: "变色天数",
+                    initialValue: viewModel.beforeDay
+                ) { value in
+                    viewModel.setDDLBeforeDay(value)
+                }
+            case .afterDay:
+                DDLSettingsNumberPickerSheet(
+                    title: "滞留天数",
+                    initialValue: viewModel.afterDay
+                ) { value in
+                    viewModel.setDDLAfterDay(value)
+                }
+            }
+        }
+        .alert(item: $viewModel.notice) { notice in
+            Alert(
+                title: Text(notice.title),
+                message: Text(notice.message),
+                dismissButton: .default(Text("知道了"))
+            )
+        }
+    }
+}
+
+/// DDL 设置页里可弹出编辑抽屉的数值项。
+private enum DDLSettingsNumberPickerRoute: String, Identifiable {
+    case beforeDay
+    case afterDay
+
+    var id: String { rawValue }
+}
+
+/// DDL 设置页按钮行。
+private struct DDLSettingsActionRow: View {
+    let title: String
+    var value: String? = nil
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .foregroundStyle(Color.accentColor)
+
+            Spacer(minLength: 0)
+
+            if let value {
+                Text(value)
+                    .foregroundStyle(Color.accentColor)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+}
+
+/// DDL 设置页数值选择抽屉。
+private struct DDLSettingsNumberPickerSheet: View {
+    let title: String
+    let initialValue: Int
+    let onSubmit: (Int) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var value: Int
+
+    init(title: String, initialValue: Int, onSubmit: @escaping (Int) -> Void) {
+        self.title = title
+        self.initialValue = initialValue
+        self.onSubmit = onSubmit
+        _value = State(initialValue: initialValue)
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack {
+                Picker(title, selection: $value) {
+                    ForEach(0 ... 30, id: \.self) { day in
+                        Text("\(day) 天")
+                            .tag(day)
+                    }
+                }
+                .pickerStyle(.wheel)
+                .labelsHidden()
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") {
+                        onSubmit(value)
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.height(240)])
+        .presentationDragIndicator(.visible)
     }
 }
 
@@ -1144,9 +1327,11 @@ private struct GallerySettingsPage: View {
 private struct AboutSettingsPage: View {
     let onLogout: () -> Void
 
+    @ObservedObject private var settings = AppSettingsStore.shared
     @State private var alert: LoginAlert?
     @State private var isResettingLocalData = false
     @State private var isShowingResetConfirmation = false
+    @State private var isShowingWidgetUsageGuide = false
 
     var body: some View {
         List {
@@ -1177,6 +1362,12 @@ private struct AboutSettingsPage: View {
                 }
             }
 
+            Section("提示") {
+                Button("重新观看小组件提示") {
+                    isShowingWidgetUsageGuide = true
+                }
+            }
+
             Section("调试") {
                 Button(role: .destructive) {
                     isShowingResetConfirmation = true
@@ -1199,6 +1390,13 @@ private struct AboutSettingsPage: View {
         }
         .alert(item: $alert) { alert in
             Alert(title: Text(alert.title), message: Text(alert.message), dismissButton: .default(Text("知道了")))
+        }
+        .alert("非常有用的几个用法", isPresented: $isShowingWidgetUsageGuide) {
+            Button("知道了") {
+                settings.markCurrentWidgetUsageGuideSeen()
+            }
+        } message: {
+            Text("推荐在锁屏添加锁屏小组件（如果你习惯使用息屏显示）。\n桌面小组件也很实用，可以尝试一波。")
         }
         .alert("删除所有文稿与数据", isPresented: $isShowingResetConfirmation) {
             Button("取消", role: .cancel) {}

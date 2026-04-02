@@ -80,8 +80,18 @@ struct AppSettingsSnapshot: Codable, Equatable {
     var galleryHiddenUserIDs: [Int] = []
     /// 用户主动隐藏的帖子摘要。
     var galleryHiddenPosters: [HiddenPosterRecord] = []
+    /// 用户主动隐藏的文章 ID 列表。
+    var paperHiddenIDs: [Int] = []
     /// 当前设备接受过的社区规则版本号。
     var galleryCommunityRulesAcceptedVersion = 0
+    /// 是否已经看过“导入分享课表”的使用提示。
+    var hasSeenSharedScheduleImportGuide = false
+    /// 当前设备已接受过的小组件使用提示版本号。
+    var widgetUsageGuideAcceptedVersion = 0
+    /// 当前账号第一次进入 app 的时间。
+    var firstOpenDate: Date?
+    /// 当前账号是否已经看过“鸣谢 LINUX DO”提示。
+    var hasShownLinuxDoThanksNotice = false
 }
 
 @MainActor
@@ -95,9 +105,13 @@ final class AppSettingsStore: ObservableObject {
     /// 当前社区规则版本号；版本提升后会强制重新弹出规则确认。
     nonisolated static let currentCommunityRulesVersion = 2
     /// 当前开屏公告版本号；变化后会重新展示一次。
-    nonisolated static let currentStartupNoticeVersion = "1.2.1"
+    nonisolated static let currentStartupNoticeVersion = "1.3.0"
     /// 开屏公告已读状态对应的全局 key。
     nonisolated static let startupNoticeSeenKey = "app.startup.notice.seen.version"
+    /// 当前“小组件使用提示”版本号；版本提升后会重新展示一次。
+    nonisolated static let currentWidgetUsageGuideVersion = 1
+    /// “鸣谢 LINUX DO”提示会在首周内按账号均匀散开弹出，避免集中到固定某一天。
+    nonisolated static let linuxDoThanksNoticeSpreadDays = 7
     private static let encoder = JSONEncoder()
     private static let decoder = JSONDecoder()
 
@@ -138,9 +152,27 @@ final class AppSettingsStore: ObservableObject {
     var galleryHiddenUserIDs: [Int] { snapshot.galleryHiddenUserIDs }
     var galleryHiddenPosters: [HiddenPosterRecord] { snapshot.galleryHiddenPosters }
     var galleryHiddenPosterIDs: [Int] { snapshot.galleryHiddenPosters.map(\.id) }
+    var paperHiddenIDs: [Int] { snapshot.paperHiddenIDs }
     var hasAcceptedCurrentCommunityRules: Bool { snapshot.galleryCommunityRulesAcceptedVersion >= Self.currentCommunityRulesVersion }
+    var hasSeenSharedScheduleImportGuide: Bool { snapshot.hasSeenSharedScheduleImportGuide }
     var shouldShowCurrentStartupNotice: Bool {
         defaults.string(forKey: Self.startupNoticeSeenKey) != Self.currentStartupNoticeVersion
+    }
+    var hasAcceptedCurrentWidgetUsageGuide: Bool { snapshot.widgetUsageGuideAcceptedVersion >= Self.currentWidgetUsageGuideVersion }
+    var shouldShowLinuxDoThanksNotice: Bool {
+        guard
+            let firstOpenDate = snapshot.firstOpenDate,
+            !snapshot.hasShownLinuxDoThanksNotice
+        else {
+            return false
+        }
+
+        let dueDate = Calendar.current.date(
+            byAdding: .day,
+            value: Self.linuxDoThanksNoticeDelayDays(for: Self.currentAccountIdentifier()),
+            to: firstOpenDate
+        ) ?? firstOpenDate
+        return Date() >= dueDate
     }
 
     /// 当前真正可见的底部页面集合。
@@ -152,7 +184,7 @@ final class AppSettingsStore: ObservableObject {
 
     /// 修改默认启动页。
     func setHomeTab(_ tab: AppTab) {
-        snapshot.homeTab = tab
+        snapshot.homeTab = normalizedHomeTab(tab)
         save()
     }
 
@@ -164,7 +196,7 @@ final class AppSettingsStore: ObservableObject {
 
     /// 保存被隐藏的 tab 集合。
     func setHiddenTabs(_ tabs: [AppTab]) {
-        snapshot.hiddenTabs = tabs.filter { $0 != .mine }
+        snapshot.hiddenTabs = tabs.filter { $0 != .mine && $0 != .paper && $0 != .course }
         if snapshot.hiddenTabs.contains(snapshot.homeTab) {
             snapshot.homeTab = visibleTabs.first ?? .schedule
         }
@@ -246,6 +278,13 @@ final class AppSettingsStore: ObservableObject {
         save()
     }
 
+    /// 把一篇文章加入本地隐藏列表。
+    func hidePaper(id: Int) {
+        guard !snapshot.paperHiddenIDs.contains(id) else { return }
+        snapshot.paperHiddenIDs.append(id)
+        save()
+    }
+
     /// 记录当前设备已经同意最新社区规则。
     func acceptCurrentCommunityRules() {
         snapshot.galleryCommunityRulesAcceptedVersion = Self.currentCommunityRulesVersion
@@ -263,6 +302,24 @@ final class AppSettingsStore: ObservableObject {
         defaults.set(Self.currentStartupNoticeVersion, forKey: Self.startupNoticeSeenKey)
     }
 
+    /// 标记“鸣谢 LINUX DO”提示已经弹出过。
+    func markLinuxDoThanksNoticeShown() {
+        snapshot.hasShownLinuxDoThanksNotice = true
+        save()
+    }
+
+    /// 标记“导入分享课表”提示已读。
+    func markSharedScheduleImportGuideSeen() {
+        snapshot.hasSeenSharedScheduleImportGuide = true
+        save()
+    }
+
+    /// 记录当前设备已经接受最新的小组件使用提示。
+    func markCurrentWidgetUsageGuideSeen() {
+        snapshot.widgetUsageGuideAcceptedVersion = Self.currentWidgetUsageGuideVersion
+        save()
+    }
+
     /// 把设置恢复到默认值。
     func resetToDefaults() {
         snapshot = AppSettingsSnapshot()
@@ -275,11 +332,18 @@ final class AppSettingsStore: ObservableObject {
     private func load() {
         guard let snapshot = Self.loadSnapshotFromDefaults() else {
             self.snapshot = AppSettingsSnapshot()
+            self.snapshot.firstOpenDate = Date()
+            save()
             return
         }
         self.snapshot = snapshot
+        self.snapshot.homeTab = normalizedHomeTab(self.snapshot.homeTab)
         self.snapshot.pageOrder = normalizePageOrder(self.snapshot.pageOrder)
-        self.snapshot.hiddenTabs = self.snapshot.hiddenTabs.filter { $0 != .mine }
+        self.snapshot.hiddenTabs = self.snapshot.hiddenTabs.filter { $0 != .mine && $0 != .paper && $0 != .course }
+        if self.snapshot.firstOpenDate == nil {
+            self.snapshot.firstOpenDate = Date()
+            save()
+        }
     }
 
     /// 把当前快照写回 `UserDefaults`。
@@ -322,25 +386,46 @@ final class AppSettingsStore: ObservableObject {
         return raw.isEmpty ? "__default__" : raw
     }
 
+    /// 按账号稳定地映射到首周内的某一天。
+    ///
+    /// 这样第一次打开当天也可能弹出，同时整体分布比固定“第 7 天”更均匀。
+    private static func linuxDoThanksNoticeDelayDays(for accountID: String) -> Int {
+        guard linuxDoThanksNoticeSpreadDays > 0 else { return 0 }
+
+        var hash: UInt64 = 1469598103934665603
+        for byte in accountID.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1099511628211
+        }
+        return Int(hash % UInt64(linuxDoThanksNoticeSpreadDays))
+    }
+
     /// 修正页面顺序，避免重复、缺失和旧版本快照造成的异常。
     private func normalizePageOrder(_ tabs: [AppTab]) -> [AppTab] {
         // 防止重复 tab、缺失 tab 或旧版本快照导致页面顺序异常。
         var ordered: [AppTab] = []
-        for tab in tabs where !ordered.contains(tab) {
+        for tab in tabs where tab != .paper && tab != .course && !ordered.contains(tab) {
             ordered.append(tab)
         }
         for tab in AppTab.allCases where !ordered.contains(tab) {
             ordered.append(tab)
         }
-        if
-            let galleryIndex = ordered.firstIndex(of: .gallery),
-            let scoreIndex = ordered.firstIndex(of: .score),
-            scoreIndex < galleryIndex
-        {
-            let scoreTab = ordered.remove(at: scoreIndex)
-            let targetIndex = ordered.firstIndex(of: .gallery).map { $0 + 1 } ?? ordered.count
-            ordered.insert(scoreTab, at: targetIndex)
+        if let mineIndex = ordered.firstIndex(of: .mine), mineIndex != ordered.count - 1 {
+            let mineTab = ordered.remove(at: mineIndex)
+            ordered.append(mineTab)
         }
         return ordered
+    }
+
+    /// 把旧版本已下线的 tab 映射到新的入口。
+    private func normalizedHomeTab(_ tab: AppTab) -> AppTab {
+        switch tab {
+        case .paper:
+            return .gallery
+        case .course:
+            return .score
+        default:
+            return tab
+        }
     }
 }

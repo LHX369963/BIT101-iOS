@@ -1228,60 +1228,77 @@ private struct DDLScheduleTabView: View {
     @State private var draft = DDLDraft()
     @State private var editingEventID: String?
     @State private var isShowingEditor = false
+    @State private var settingsRoute: SettingsRoute?
 
     var body: some View {
-        Group {
-            if !viewModel.hasLexueCalendarURL {
-                VStack(spacing: 16) {
-                    Button {
-                        Task {
-                            await viewModel.refreshLexueCalendarURL()
-                            await viewModel.syncDDL()
-                        }
-                    } label: {
-                        HStack {
-                            if viewModel.isSyncingDDL {
-                                ProgressView()
+        ZStack(alignment: .bottomTrailing) {
+            Group {
+                if !viewModel.hasLexueCalendarURL {
+                    VStack(spacing: 16) {
+                        Button {
+                            Task {
+                                await viewModel.refreshLexueCalendarURL(showSuccessNotice: false)
+                                await viewModel.syncDDL()
                             }
-                            Text("获取乐学日程")
+                        } label: {
+                            HStack {
+                                if viewModel.isSyncingDDL {
+                                    ProgressView()
+                                }
+                                Text("获取乐学日程")
+                            }
                         }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(viewModel.isSyncingDDL)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(viewModel.isSyncingDDL)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List {
-                    if viewModel.visibleDDLEvents.isEmpty {
-                        Section {
-                            ContentUnavailableView(
-                                "暂无 DDL",
-                                systemImage: "list.bullet.clipboard",
-                                description: Text("先获取乐学日程，或手动添加一条。")
-                            )
-                            .frame(maxWidth: .infinity)
-                        }
-                    } else {
-                        Section {
-                            ForEach(viewModel.visibleDDLEvents) { event in
-                                DDLEventCard(
-                                    event: event,
-                                    remainText: viewModel.ddlRemainingText(for: event),
-                                    dueText: viewModel.ddlDueText(for: event),
-                                    tint: color(for: event),
-                                    onToggleDone: { viewModel.toggleDDLDone(event) },
-                                    onOpenDetail: { selectedEvent = event }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        if viewModel.visibleDDLEvents.isEmpty {
+                            Section {
+                                ContentUnavailableView(
+                                    "暂无 DDL",
+                                    systemImage: "list.bullet.clipboard",
+                                    description: Text("先获取乐学日程，或手动添加一条。")
                                 )
+                                .frame(maxWidth: .infinity)
+                            }
+                        } else {
+                            Section {
+                                ForEach(viewModel.visibleDDLEvents) { event in
+                                    DDLEventCard(
+                                        event: event,
+                                        remainText: viewModel.ddlRemainingText(for: event),
+                                        dueText: viewModel.ddlDueText(for: event),
+                                        tint: color(for: event),
+                                        onToggleDone: { viewModel.toggleDDLDone(event) },
+                                        onOpenDetail: { selectedEvent = event }
+                                    )
+                                }
                             }
                         }
                     }
-                }
-                .listStyle(.insetGrouped)
-                .safeAreaInset(edge: .bottom) {
-                    Color.clear
-                        .frame(height: 0)
+                    .listStyle(.insetGrouped)
+                    .safeAreaInset(edge: .bottom) {
+                        Color.clear
+                            .frame(height: 112)
+                    }
                 }
             }
+
+            VStack(spacing: 10) {
+                CourseScheduleFAB(systemImage: "plus") {
+                    editingEventID = nil
+                    draft = DDLDraft()
+                    isShowingEditor = true
+                }
+
+                CourseScheduleFAB(systemImage: "gearshape") {
+                    settingsRoute = .ddl
+                }
+            }
+            .padding(.trailing, 10)
+            .padding(.bottom, 20)
         }
         .sheet(item: $selectedEvent) { event in
             DDLEventDetailSheet(
@@ -1316,6 +1333,11 @@ private struct DDLScheduleTabView: View {
                 },
                 onDismiss: { isShowingEditor = false }
             )
+        }
+        .sheet(item: $settingsRoute) { route in
+            NavigationStack {
+                SettingsRootView(initialRoute: route, studentID: "", onLogout: {}, showsCloseButton: true)
+            }
         }
     }
 
@@ -1358,8 +1380,8 @@ private struct DDLEventCard: View {
                     .font(.headline)
                     .strikethrough(event.done)
 
-                if !event.text.isEmpty {
-                    Text(event.text)
+                if !displayText.isEmpty {
+                    Text(displayText)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(3)
@@ -1382,6 +1404,10 @@ private struct DDLEventCard: View {
         .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .onTapGesture(perform: onOpenDetail)
+    }
+
+    private var displayText: String {
+        event.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -1411,7 +1437,7 @@ private struct DDLEventDetailSheet: View {
 
                 Section("详情") {
                     Text(remainText)
-                    Text(event.text.isEmpty ? "无详情" : event.text)
+                    Text(detailText.isEmpty ? "无详情" : detailText)
                 }
 
                 if event.group != "lexue" {
@@ -1434,6 +1460,10 @@ private struct DDLEventDetailSheet: View {
                 }
             }
         }
+    }
+
+    private var detailText: String {
+        event.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -1467,6 +1497,8 @@ private struct DDLEditSheet: View {
                 }
             }
         }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 }
 
