@@ -16,6 +16,31 @@ private extension Int {
     }
 }
 
+/// 空教室列表里的教室名自然升序比较器。
+///
+/// 这里使用 `localizedStandardCompare`，让 `101 -> 102 -> 103` 这类教室名
+/// 按人类直觉排序，而不是简单字典序。
+private func classroomNameAscending(_ lhs: ClassroomAvailability, _ rhs: ClassroomAvailability) -> Bool {
+    let lhsName = lhs.name.trimmingCharacters(in: .whitespacesAndNewlines)
+    let rhsName = rhs.name.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    switch (lhsName.isEmpty, rhsName.isEmpty) {
+    case (true, false):
+        return false
+    case (false, true):
+        return true
+    default:
+        break
+    }
+
+    let nameOrder = lhsName.localizedStandardCompare(rhsName)
+    if nameOrder != .orderedSame {
+        return nameOrder == .orderedAscending
+    }
+
+    return lhs.id.localizedStandardCompare(rhs.id) == .orderedAscending
+}
+
 /// 日程页统一使用的提示模型。
 ///
 /// 日程模块内部的同步、保存、空教室查询等动作都会通过这个统一提示模型把错误抛给视图层。
@@ -963,14 +988,7 @@ final class ScheduleViewModel: ObservableObject {
                 if currentFreeOnly, lhs.isFreeNow != rhs.isFreeNow {
                     return lhs.isFreeNow
                 }
-                if !currentFreeOnly {
-                    let lhsMatches = selectedSet.intersection(lhs.freeSections).count
-                    let rhsMatches = selectedSet.intersection(rhs.freeSections).count
-                    if lhsMatches != rhsMatches {
-                        return lhsMatches > rhsMatches
-                    }
-                }
-                return lhs.name < rhs.name
+                return classroomNameAscending(lhs, rhs)
             }
     }
 

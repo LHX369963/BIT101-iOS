@@ -35,49 +35,6 @@ private func courseShouldLoadMore(currentID: Int, state: CoursePagedState) -> Bo
     return true
 }
 
-/// 判断当前课程列表是否处于“筛选后”状态。
-///
-/// 课程页默认沿用后端返回顺序；只有用户主动输入搜索词后，
-/// 才在本地按课程名做一次自然升序，便于快速定位 `101 -> 102 -> 103` 这类课程。
-private func courseResultsShouldSortByName(search: String) -> Bool {
-    !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-}
-
-/// 课程名自然升序比较器。
-///
-/// 这里使用 `localizedStandardCompare`，让带数字的课程名按人类直觉排序，
-/// 例如 `101` 会排在 `102` 前面，而不是简单的字典序。
-private func courseNameAscending(_ lhs: CourseSummary, _ rhs: CourseSummary) -> Bool {
-    let lhsName = lhs.name.trimmingCharacters(in: .whitespacesAndNewlines)
-    let rhsName = rhs.name.trimmingCharacters(in: .whitespacesAndNewlines)
-
-    switch (lhsName.isEmpty, rhsName.isEmpty) {
-    case (true, false):
-        return false
-    case (false, true):
-        return true
-    default:
-        break
-    }
-
-    let nameOrder = lhsName.localizedStandardCompare(rhsName)
-    if nameOrder != .orderedSame {
-        return nameOrder == .orderedAscending
-    }
-
-    let numberOrder = lhs.number.localizedStandardCompare(rhs.number)
-    if numberOrder != .orderedSame {
-        return numberOrder == .orderedAscending
-    }
-
-    let teacherOrder = lhs.teachersName.localizedStandardCompare(rhs.teachersName)
-    if teacherOrder != .orderedSame {
-        return teacherOrder == .orderedAscending
-    }
-
-    return lhs.id < rhs.id
-}
-
 private extension CoursePagedState {
     /// 进入首屏刷新时重置分页游标。
     mutating func prepareForRefresh() {
@@ -89,8 +46,8 @@ private extension CoursePagedState {
     }
 
     /// 首屏页加载完成后统一落状态。
-    mutating func applyFirstPage(_ items: [CourseSummary], sortByName: Bool) {
-        self.items = sortByName ? items.sorted(by: courseNameAscending) : items
+    mutating func applyFirstPage(_ items: [CourseSummary]) {
+        self.items = items
         status = .loaded
         nextPage = 1
         canLoadMore = !items.isEmpty
@@ -98,11 +55,8 @@ private extension CoursePagedState {
     }
 
     /// 追加后续分页结果，并推进下一页游标。
-    mutating func appendPage(_ items: [CourseSummary], sortByName: Bool) {
+    mutating func appendPage(_ items: [CourseSummary]) {
         self.items.append(contentsOf: items)
-        if sortByName {
-            self.items.sort(by: courseNameAscending)
-        }
         nextPage += 1
         isLoadingMore = false
         canLoadMore = !items.isEmpty
@@ -154,10 +108,7 @@ final class CourseListViewModel: ObservableObject {
                 search: normalizedSearchText,
                 page: 0
             )
-            state.applyFirstPage(
-                items,
-                sortByName: courseResultsShouldSortByName(search: normalizedSearchText)
-            )
+            state.applyFirstPage(items)
         } catch {
             if isCourseRequestCancellation(error) {
                 if !hadCourses {
@@ -191,10 +142,7 @@ final class CourseListViewModel: ObservableObject {
                 search: normalizedSearchText,
                 page: state.nextPage
             )
-            state.appendPage(
-                items,
-                sortByName: courseResultsShouldSortByName(search: normalizedSearchText)
-            )
+            state.appendPage(items)
         } catch {
             if isCourseRequestCancellation(error) {
                 state.isLoadingMore = false
