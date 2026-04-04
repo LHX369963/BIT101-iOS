@@ -102,12 +102,11 @@ enum AppTab: String, Identifiable, Codable {
 ///
 /// 壳层只关心两件事：按照设置中心决定展示哪些 tab，以及把退出登录回调继续往下传。
 struct AppShellView: View {
-    private static let startupNoticeTitle = "1.3.0版本更新"
+    private static let startupNoticeTitle = "1.3.1版本更新"
     private static let startupNoticeBody = """
     1、bugfix
-    2、增加话廊-文章页面
-    3、增加学业-课程界面
-    4、使用体验优化
+    2、优化浏览体验
+    3、添加ICP备案信息
     """
     private static let widgetUsageGuideTitle = "非常有用的几个用法"
     private static let widgetUsageGuideBody = """
@@ -298,26 +297,32 @@ struct AppShellView: View {
     /// 因此这里把提示状态集中收口，供 onAppear / 回前台 / 课表缓存变化共同复用。
     private func refreshScheduleNotificationPromptIfNeeded() {
         Task {
-            let authorizationState = await ScheduleLiveActivityManager.shared.notificationAuthorizationStateForReminderFallback()
-            await MainActor.run {
+            let shouldContinue = await MainActor.run { () -> Bool in
                 if settings.shouldShowCurrentStartupNotice {
                     isShowingStartupNotice = true
-                    return
+                    return false
                 }
 
                 if !settings.hasAcceptedCurrentWidgetUsageGuide {
                     isShowingWidgetUsageGuide = true
-                    return
+                    return false
                 }
 
                 if settings.shouldShowLinuxDoThanksNotice {
                     isShowingLinuxDoThanksNotice = true
-                    return
+                    return false
                 }
 
-                if authorizationState != .allowed {
-                    presentScheduleNotificationPromptIfNeeded()
-                }
+                return true
+            }
+
+            guard shouldContinue else { return }
+
+            let authorizationState = await ScheduleLiveActivityManager.shared.notificationAuthorizationStateForReminderFallback()
+            guard authorizationState == .denied else { return }
+
+            await MainActor.run {
+                presentScheduleNotificationPromptIfNeeded()
             }
         }
     }
@@ -366,7 +371,7 @@ struct AppShellView: View {
         // 后续若要回收这条绕路实现，优先方向应该是统一顶层弹窗路由，而不是直接删回 `.alert`。
         let alert = UIAlertController(
             title: "请开启通知",
-            message: "灵动岛需要应用常驻前台；应用未能自动启动时，会使用本地通知，以避免您错过上课。请在系统设置中允许 BIT101 发送通知。",
+            message: "灵动岛需要应用常驻前台；应用未能自动启动时，会使用本地通知，以避免您错过上课。请在系统设置的通知页面中允许 BIT101 发送通知。",
             preferredStyle: .alert
         )
         alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in
@@ -374,8 +379,11 @@ struct AppShellView: View {
         })
         alert.addAction(UIAlertAction(title: "转到设置", style: .default) { _ in
             isShowingScheduleNotificationPrompt = false
-            guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-            openURL(url)
+            if let url = URL(string: UIApplication.openNotificationSettingsURLString) {
+                openURL(url)
+            } else if let fallbackURL = URL(string: UIApplication.openSettingsURLString) {
+                openURL(fallbackURL)
+            }
         })
 
         isShowingScheduleNotificationPrompt = true

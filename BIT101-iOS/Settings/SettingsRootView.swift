@@ -677,9 +677,11 @@ private struct CalendarSettingsPage: View {
                 Text("显示设置")
             }
 
-            Section("帮助") {
-                Button("重新观看提示") {
-                    presentImportGuideIfNeeded(openImportAfterGuide: false, forceShow: true)
+            if appSettings.hasSeenSharedScheduleImportGuide {
+                Section("帮助") {
+                    Button("重新观看提示") {
+                        presentImportGuideIfNeeded(openImportAfterGuide: false, forceShow: true)
+                    }
                 }
             }
         }
@@ -806,7 +808,7 @@ private struct CalendarSettingsPage: View {
         }
     }
 
-    /// 首次导入前先展示一次使用提示；后续只在用户主动点“重新观看提示”时再展示。
+    /// 首次导入前先展示一次使用提示；只有真正看过这条提示后，设置页才会出现“重新观看提示”入口。
     private func presentImportGuideIfNeeded(openImportAfterGuide: Bool, forceShow: Bool = false) {
         shouldOpenImportSheetAfterGuide = openImportAfterGuide
 
@@ -1350,6 +1352,8 @@ private struct AboutSettingsPage: View {
             }
 
             Section("关于本 APP") {
+                LabeledContent("ICP备案", value: "京ICP备2026016481号-1A")
+
                 NavigationLink("开源声明") {
                     ScrollView {
                         Text(mitLicenseText)

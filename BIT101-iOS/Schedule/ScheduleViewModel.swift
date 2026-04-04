@@ -481,14 +481,8 @@ final class ScheduleViewModel: ObservableObject {
         persist()
 
         if value {
-            Task { [weak self] in
-                let granted = await ScheduleLiveActivityManager.shared.requestNotificationAuthorizationIfNeeded()
-                if !granted {
-                    self?.notice = ScheduleNotice(
-                        title: "通知未开启",
-                        message: "灵动岛需要应用常驻前台；应用未能自动启动时，会使用本地通知，以避免您错过上课。请在系统设置中允许 BIT101 发送通知。"
-                    )
-                }
+            Task {
+                _ = await ScheduleLiveActivityManager.shared.requestNotificationAuthorizationIfNeeded()
                 await ScheduleLiveActivityManager.shared.refreshFromCurrentCache(trigger: "reminder_toggle_enabled")
             }
         }
