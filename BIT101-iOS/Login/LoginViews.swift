@@ -111,6 +111,17 @@ private struct LoginFormView: View {
         .navigationTitle("登录")
         .navigationBarTitleDisplayMode(.inline)
         .scrollDismissesKeyboard(.interactively)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            Link(destination: AppLegalInfo.icpPublicNoticeURL) {
+                Text(AppLegalInfo.icpDisplayText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 6)
+                    .padding(.bottom, 10)
+            }
+        }
     }
 }
 

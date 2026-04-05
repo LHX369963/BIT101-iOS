@@ -1352,7 +1352,12 @@ private struct AboutSettingsPage: View {
             }
 
             Section("关于本 APP") {
-                LabeledContent("ICP备案", value: "京ICP备2026016481号-1A")
+                Link(destination: AppLegalInfo.icpPublicNoticeURL) {
+                    LabeledContent("ICP备案") {
+                        Text(AppLegalInfo.icpDisplayText)
+                            .foregroundStyle(.tint)
+                    }
+                }
 
                 NavigationLink("开源声明") {
                     ScrollView {

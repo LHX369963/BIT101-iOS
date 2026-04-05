@@ -503,9 +503,10 @@ private struct CourseScheduleCalendarView: View {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
-        formatter.dateFormat = "MM/dd"
+        formatter.dateFormat = "M.d"
         return formatter
     }()
+    private static let weekdayTitles = ["一", "二", "三", "四", "五", "六", "七"]
 
     let entries: [ScheduleCalendarEntry]
     let week: Int
@@ -559,7 +560,7 @@ private struct CourseScheduleCalendarView: View {
 
                         ForEach(Array(weekDates.enumerated()), id: \.offset) { index, date in
                             VStack(spacing: 2) {
-                                Text("周\(visibleWeekdays[index])")
+                                Text(weekdayText(for: visibleWeekdays[index]))
                                 Text(mmddText(for: date))
                             }
                             .font(.caption2)
@@ -645,6 +646,13 @@ private struct CourseScheduleCalendarView: View {
 
     private func mmddText(for date: Date) -> String {
         Self.monthDayFormatter.string(from: date)
+    }
+
+    private func weekdayText(for weekday: Int) -> String {
+        guard (1 ... Self.weekdayTitles.count).contains(weekday) else {
+            return "?"
+        }
+        return Self.weekdayTitles[weekday - 1]
     }
 
     private func currentTimeText() -> String {
