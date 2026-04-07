@@ -21,21 +21,23 @@ private func isGalleryCancellation(_ error: Error) -> Bool {
     return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
 }
 
+/// 推荐流预取缓存页。
+///
+/// iOS 17 上 `ObservableObject` 在反射 `GalleryViewModel` 的存储属性时，
+/// 对类内嵌套私有类型的 metadata 处理不稳定，导致进入话题页时崩溃。
+/// 这里把类型提升到文件级，避免 `@StateObject` 初始化时触发该系统问题。
+private struct GalleryPrefetchedPage {
+    let page: Int
+    let posters: [GalleryPoster]
+    let nextPage: Int
+    let canLoadMore: Bool
+}
+
 @MainActor
 /// 话题页状态机。
 ///
 /// 同时管理四个 feed 和一个搜索结果页，并显式处理分页、刷新和取消错误。
 final class GalleryViewModel: ObservableObject {
-    /// 推荐流预取到本地但尚未真正拼进列表的一页数据。
-    ///
-    /// 预取结果只保留“下一页/下两页”，等用户真正滚到底时再消费。
-    private struct GalleryPrefetchedPage {
-        let page: Int
-        let posters: [GalleryPoster]
-        let nextPage: Int
-        let canLoadMore: Bool
-    }
-
     /// 当前选中的 feed。
     @Published var selectedFeed: GalleryFeedKind = .recommend
     /// 搜索页当前条件。

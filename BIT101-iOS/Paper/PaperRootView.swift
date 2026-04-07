@@ -158,7 +158,9 @@ struct PaperRootView: View {
         .sheet(isPresented: $isShowingComposer) {
             NavigationStack {
                 PaperComposerView {
-                    await handleComposerCreated()
+                    Task {
+                        await handleComposerCreated()
+                    }
                 }
             }
         }
@@ -714,10 +716,14 @@ private struct PaperDetailView: View {
                         Task { await viewModel.toggleCommentLike(comment) }
                     },
                     onLoadMore: { comment in
-                        await viewModel.loadMoreCommentsIfNeeded(currentComment: comment)
+                        Task {
+                            await viewModel.loadMoreCommentsIfNeeded(currentComment: comment)
+                        }
                     },
                     onRetry: {
-                        await viewModel.refreshComments()
+                        Task {
+                            await viewModel.refreshComments()
+                        }
                     }
                 )
             }
@@ -744,7 +750,12 @@ private struct PaperDetailView: View {
                     target: target,
                     isSubmitting: viewModel.isSubmittingComment
                 ) { text, anonymous in
-                    await viewModel.submitComment(text: text, anonymous: anonymous, target: target)
+                    Task {
+                        let submitted = await viewModel.submitComment(text: text, anonymous: anonymous, target: target)
+                        if submitted {
+                            composerTarget = nil
+                        }
+                    }
                 }
             }
             .presentationDragIndicator(.visible)
@@ -1022,8 +1033,8 @@ private struct PaperCommentsSection: View {
     let onSelectOrder: (GalleryCommentOrder) -> Void
     let onReply: (PaperCommentReplyTarget) -> Void
     let onLikeComment: (GalleryComment) -> Void
-    let onLoadMore: @Sendable (GalleryComment?) async -> Void
-    let onRetry: @Sendable () async -> Void
+    let onLoadMore: (GalleryComment?) -> Void
+    let onRetry: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1054,11 +1065,7 @@ private struct PaperCommentsSection: View {
                     systemImage: "text.bubble",
                     title: "加载评论失败",
                     message: message,
-                    onRetry: {
-                        Task {
-                            await onRetry()
-                        }
-                    }
+                    onRetry: onRetry
                 )
             case .loaded:
                 if comments.isEmpty {
@@ -1084,9 +1091,7 @@ private struct PaperCommentsSection: View {
                                 }
                             }
                             .onAppear {
-                                Task {
-                                    await onLoadMore(comment)
-                                }
+                                onLoadMore(comment)
                             }
                         }
 
@@ -1312,7 +1317,7 @@ private struct PaperFloatingActionButton: View {
 /// 当前先提供最小原生编辑器：标题、简介、正文、匿名开关。
 /// 正文会在提交前包装成最小 Editor.js JSON，避免和网页端内容格式割裂。
 private struct PaperComposerView: View {
-    let onCreated: @Sendable () async -> Void
+    let onCreated: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
@@ -1386,7 +1391,7 @@ private struct PaperComposerView: View {
                 content: PaperEditorContentBuilder.editorJSON(from: trimmedContent),
                 anonymous: anonymous
             )
-            await onCreated()
+            onCreated()
             dismiss()
         } catch {
             alert = LoginAlert(title: "发布失败", message: error.localizedDescription)
@@ -1397,7 +1402,7 @@ private struct PaperComposerView: View {
 private struct PaperCommentComposerSheet: View {
     let target: PaperCommentComposerTarget
     let isSubmitting: Bool
-    let onSubmit: @Sendable (String, Bool) async -> Bool
+    let onSubmit: (String, Bool) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
@@ -1429,12 +1434,7 @@ private struct PaperCommentComposerSheet: View {
 
             ToolbarItem(placement: .confirmationAction) {
                 Button(isSubmitting ? "发送中…" : "发布") {
-                    Task {
-                        let submitted = await onSubmit(text, anonymous)
-                        if submitted {
-                            dismiss()
-                        }
-                    }
+                    onSubmit(text, anonymous)
                 }
                 .disabled(isSubmitting || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }

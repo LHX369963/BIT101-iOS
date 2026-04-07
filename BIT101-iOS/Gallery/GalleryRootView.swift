@@ -121,13 +121,19 @@ struct GalleryRootView: View {
                 feedIdentity: viewModel.selectedFeed.rawValue,
                 prefetchTriggerThreshold: viewModel.selectedFeed == .recommend ? 10 : 0,
                 onRefresh: {
-                    await viewModel.refresh(feed: viewModel.selectedFeed)
+                    Task {
+                        await viewModel.refresh(feed: viewModel.selectedFeed)
+                    }
                 },
                 onPrefetch: { poster in
-                    await viewModel.prefetchIfNeeded(for: viewModel.selectedFeed, currentPoster: poster)
+                    Task {
+                        await viewModel.prefetchIfNeeded(for: viewModel.selectedFeed, currentPoster: poster)
+                    }
                 },
                 onLoadMore: { poster in
-                    await viewModel.loadMoreIfNeeded(for: viewModel.selectedFeed, currentPoster: poster)
+                    Task {
+                        await viewModel.loadMoreIfNeeded(for: viewModel.selectedFeed, currentPoster: poster)
+                    }
                 }
             )
             .simultaneousGesture(feedSwitchGesture)
@@ -200,10 +206,12 @@ struct GalleryRootView: View {
         }
         .sheet(isPresented: $isShowingComposer) {
             GalleryComposerView {
-                await MainActor.run {
-                    viewModel.selectedFeed = .newest
+                Task {
+                    await MainActor.run {
+                        viewModel.selectedFeed = .newest
+                    }
+                    await viewModel.refresh(feed: .newest)
                 }
-                await viewModel.refresh(feed: .newest)
             }
         }
         .alert(item: $viewModel.alert) { alert in
@@ -366,9 +374,9 @@ private struct GalleryFeedView: View {
     let feedState: GalleryFeedState
     let feedIdentity: String
     let prefetchTriggerThreshold: Int
-    let onRefresh: @Sendable () async -> Void
-    let onPrefetch: @Sendable (GalleryPoster?) async -> Void
-    let onLoadMore: @Sendable (GalleryPoster?) async -> Void
+    let onRefresh: () -> Void
+    let onPrefetch: (GalleryPoster?) -> Void
+    let onLoadMore: (GalleryPoster?) -> Void
     @ObservedObject private var settings = AppSettingsStore.shared
     private let reportService = CommunityReportService()
     @State private var selectedPoster: GalleryPoster?
@@ -393,9 +401,7 @@ private struct GalleryFeedView: View {
                             Text(message)
                         } actions: {
                             Button("重试") {
-                                Task {
-                                    await onRefresh()
-                                }
+                                onRefresh()
                             }
                         }
                     }
@@ -431,14 +437,10 @@ private struct GalleryFeedView: View {
                             )
                             .onAppear {
                                 if prefetchTriggerPosterIDs.contains(poster.id) {
-                                    Task {
-                                        await onPrefetch(poster)
-                                    }
+                                    onPrefetch(poster)
                                 }
                                 guard poster.id == visiblePosters.last?.id else { return }
-                                Task {
-                                    await onLoadMore(poster)
-                                }
+                                onLoadMore(poster)
                             }
                         }
 
@@ -459,7 +461,7 @@ private struct GalleryFeedView: View {
             .id(feedIdentity)
             .refreshable {
                 pendingRestorePosterID = currentTopPosterID ?? visiblePosters.first?.id
-                await onRefresh()
+                onRefresh()
             }
             .onPreferenceChange(GalleryVisiblePosterOffsetPreferenceKey.self) { offsets in
                 currentTopPosterID = topVisiblePosterID(from: offsets)
@@ -474,7 +476,7 @@ private struct GalleryFeedView: View {
                     onReport: { _ in },
                     onDeleted: {
                         deletedPosterIDs.insert(poster.id)
-                        await onRefresh()
+                        onRefresh()
                     }
                 )
             }
@@ -647,6 +649,9 @@ struct GalleryPosterCard: View {
                         onSelectAction: onReport,
                         onDelete: onDelete
                     )
+                    // 右上角菜单需要吞掉点击，避免父卡片的 onTapGesture 同时触发进详情。
+                    .contentShape(Rectangle())
+                    .onTapGesture { }
                 }
             }
 
@@ -830,12 +835,12 @@ struct GalleryPosterDetailView: View {
     @State private var userRoute: UserRoute?
     @State private var isShowingDeleteConfirmation = false
     let onReport: ((CommunityReportAction) -> Void)?
-    let onDeleted: (@Sendable () async -> Void)?
+    let onDeleted: (() -> Void)?
 
     init(
         poster: GalleryPoster,
         onReport: ((CommunityReportAction) -> Void)? = nil,
-        onDeleted: (@Sendable () async -> Void)? = nil
+        onDeleted: (() -> Void)? = nil
     ) {
         _viewModel = StateObject(wrappedValue: GalleryPosterDetailViewModel(initialPoster: poster))
         self.onReport = onReport
@@ -987,7 +992,9 @@ struct GalleryPosterDetailView: View {
                         userRoute = UserRoute(userID: user.id)
                     },
                     onLoadMore: { comment in
-                        await viewModel.loadMoreCommentsIfNeeded(currentComment: comment)
+                        Task {
+                            await viewModel.loadMoreCommentsIfNeeded(currentComment: comment)
+                        }
                     }
                 )
             }
@@ -1033,7 +1040,12 @@ struct GalleryPosterDetailView: View {
                 target: target,
                 isSubmitting: viewModel.isSubmittingComment
             ) { text, anonymous in
-                await viewModel.submitComment(text: text, anonymous: anonymous, target: target)
+                Task {
+                    let success = await viewModel.submitComment(text: text, anonymous: anonymous, target: target)
+                    if success {
+                        composerTarget = nil
+                    }
+                }
             }
         }
         .alert(item: $viewModel.alert) { alert in
@@ -1052,7 +1064,7 @@ struct GalleryPosterDetailView: View {
             Button("删除", role: .destructive) {
                 Task {
                     if await viewModel.deletePoster() {
-                        await onDeleted?()
+                        onDeleted?()
                         dismiss()
                     }
                 }
@@ -1117,7 +1129,7 @@ private struct GalleryPosterCommentsSection: View {
     let onLikeComment: (GalleryComment) -> Void
     let onOpenImage: (Int, [GalleryImage]) -> Void
     let onOpenUser: (GalleryUser) -> Void
-    let onLoadMore: @Sendable (GalleryComment?) async -> Void
+    let onLoadMore: (GalleryComment?) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1176,9 +1188,7 @@ private struct GalleryPosterCommentsSection: View {
                                 }
                             }
                             .onAppear {
-                                Task {
-                                    await onLoadMore(comment)
-                                }
+                                onLoadMore(comment)
                             }
                         }
 
@@ -1411,7 +1421,7 @@ private struct GalleryCommentBubble: View {
 private struct GalleryCommentComposerSheet: View {
     let target: GalleryCommentComposerTarget
     let isSubmitting: Bool
-    let onSubmit: @Sendable (String, Bool) async -> Bool
+    let onSubmit: (String, Bool) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
@@ -1435,12 +1445,7 @@ private struct GalleryCommentComposerSheet: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(isSubmitting ? "发送中" : "发送") {
-                        Task {
-                            let success = await onSubmit(text, anonymous)
-                            if success {
-                                dismiss()
-                            }
-                        }
+                        onSubmit(text, anonymous)
                     }
                     .disabled(isSubmitting)
                 }
@@ -1464,11 +1469,15 @@ private struct GallerySearchView: View {
             feedIdentity: "search",
             prefetchTriggerThreshold: 0,
             onRefresh: {
-                await viewModel.performSearch()
+                Task {
+                    await viewModel.performSearch()
+                }
             },
             onPrefetch: { _ in },
             onLoadMore: { poster in
-                await viewModel.loadMoreSearchResultsIfNeeded(currentPoster: poster)
+                Task {
+                    await viewModel.loadMoreSearchResultsIfNeeded(currentPoster: poster)
+                }
             }
         )
         .safeAreaInset(edge: .top) {

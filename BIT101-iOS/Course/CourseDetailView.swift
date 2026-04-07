@@ -56,7 +56,9 @@ struct CourseDetailView: View {
                         userRoute = UserRoute(userID: user.id)
                     },
                     onLoadMore: { comment in
-                        await viewModel.loadMoreCommentsIfNeeded(currentComment: comment)
+                        Task {
+                            await viewModel.loadMoreCommentsIfNeeded(currentComment: comment)
+                        }
                     }
                 )
             }
@@ -81,7 +83,12 @@ struct CourseDetailView: View {
                 target: target,
                 isSubmitting: viewModel.isSubmittingComment
             ) { text, anonymous, rate in
-                await viewModel.submitComment(text: text, anonymous: anonymous, rate: rate, target: target)
+                Task {
+                    let success = await viewModel.submitComment(text: text, anonymous: anonymous, rate: rate, target: target)
+                    if success {
+                        composerTarget = nil
+                    }
+                }
             }
         }
         .fullScreenCover(item: $imageViewer) { viewer in
@@ -177,7 +184,7 @@ private struct CourseCommentsSection: View {
     let onLikeComment: (GalleryComment) -> Void
     let onOpenImage: (Int, [GalleryImage]) -> Void
     let onOpenUser: (GalleryUser) -> Void
-    let onLoadMore: @Sendable (GalleryComment?) async -> Void
+    let onLoadMore: (GalleryComment?) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -231,9 +238,7 @@ private struct CourseCommentsSection: View {
                                 }
                             }
                             .onAppear {
-                                Task {
-                                    await onLoadMore(comment)
-                                }
+                                onLoadMore(comment)
                             }
                         }
 
@@ -545,7 +550,7 @@ private struct CourseCommentThumbnail: View {
 private struct CourseCommentComposerSheet: View {
     let target: CourseCommentComposerTarget
     let isSubmitting: Bool
-    let onSubmit: @Sendable (String, Bool, Int?) async -> Bool
+    let onSubmit: (String, Bool, Int?) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
@@ -618,12 +623,7 @@ private struct CourseCommentComposerSheet: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(isSubmitting ? "发送中" : "发送") {
-                        Task {
-                            let success = await onSubmit(text, anonymous, rawRating)
-                            if success {
-                                dismiss()
-                            }
-                        }
+                        onSubmit(text, anonymous, rawRating)
                     }
                     .disabled(isSubmitting)
                 }

@@ -122,7 +122,7 @@ struct GalleryComposerView: View {
     /// 发帖成功后的回调。
     ///
     /// 调用方通常会在这里刷新当前 feed，并在必要时切回用户刚发帖的分栏。
-    let onCreated: @Sendable () async -> Void
+    let onCreated: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     /// 帖子标题。
@@ -379,7 +379,7 @@ struct GalleryComposerView: View {
                 claimID: selectedClaimID,
                 isPublic: isPublic
             )
-            await onCreated()
+            onCreated()
             dismiss()
         } catch {
             alert = LoginAlert(title: "发布失败", message: error.localizedDescription)

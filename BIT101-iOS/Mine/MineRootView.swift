@@ -62,8 +62,12 @@ struct MineRootView: View {
                     users: viewModel.followerState.items,
                     status: viewModel.followerState.status,
                     isLoadingMore: viewModel.followerState.isLoadingMore,
-                    onRefresh: { await viewModel.refreshFollowers() },
-                    onLoadMore: { user in await viewModel.loadMoreFollowersIfNeeded(currentUser: user) }
+                    onRefresh: {
+                        Task { await viewModel.refreshFollowers() }
+                    },
+                    onLoadMore: { user in
+                        Task { await viewModel.loadMoreFollowersIfNeeded(currentUser: user) }
+                    }
                 )
             case .followings:
                 MineUserListView(
@@ -71,16 +75,24 @@ struct MineRootView: View {
                     users: viewModel.followingState.items,
                     status: viewModel.followingState.status,
                     isLoadingMore: viewModel.followingState.isLoadingMore,
-                    onRefresh: { await viewModel.refreshFollowings() },
-                    onLoadMore: { user in await viewModel.loadMoreFollowingsIfNeeded(currentUser: user) }
+                    onRefresh: {
+                        Task { await viewModel.refreshFollowings() }
+                    },
+                    onLoadMore: { user in
+                        Task { await viewModel.loadMoreFollowingsIfNeeded(currentUser: user) }
+                    }
                 )
             case .posters:
                 MinePosterListView(
                     posters: viewModel.posterState.items,
                     status: viewModel.posterState.status,
                     isLoadingMore: viewModel.posterState.isLoadingMore,
-                    onRefresh: { await viewModel.refreshPosters() },
-                    onLoadMore: { poster in await viewModel.loadMorePostersIfNeeded(currentPoster: poster) }
+                    onRefresh: {
+                        Task { await viewModel.refreshPosters() }
+                    },
+                    onLoadMore: { poster in
+                        Task { await viewModel.loadMorePostersIfNeeded(currentPoster: poster) }
+                    }
                 )
             }
         }
@@ -401,8 +413,8 @@ private struct MineUserListView: View {
     let users: [GalleryUser]
     let status: MineLoadStatus
     let isLoadingMore: Bool
-    let onRefresh: @Sendable () async -> Void
-    let onLoadMore: @Sendable (GalleryUser?) async -> Void
+    let onRefresh: () -> Void
+    let onLoadMore: (GalleryUser?) -> Void
 
     var body: some View {
         Group {
@@ -452,7 +464,7 @@ private struct MineUserListView: View {
                             }
                         }
                         .task {
-                            await onLoadMore(user)
+                            onLoadMore(user)
                         }
                     }
 
@@ -465,13 +477,13 @@ private struct MineUserListView: View {
                     }
                 }
                 .refreshable {
-                    await onRefresh()
+                    onRefresh()
                 }
             }
         }
         .task {
             if case .idle = status {
-                await onRefresh()
+                onRefresh()
             }
         }
         .navigationTitle(title)
@@ -493,8 +505,8 @@ private struct MinePosterListView: View {
     let posters: [GalleryPoster]
     let status: MineLoadStatus
     let isLoadingMore: Bool
-    let onRefresh: @Sendable () async -> Void
-    let onLoadMore: @Sendable (GalleryPoster?) async -> Void
+    let onRefresh: () -> Void
+    let onLoadMore: (GalleryPoster?) -> Void
     @State private var selectedPoster: GalleryPoster?
     @State private var imageViewer: GalleryImageViewerState?
     @State private var deletingPoster: GalleryPoster?
@@ -539,7 +551,7 @@ private struct MinePosterListView: View {
                                 onDelete: { deletingPoster = poster }
                             )
                             .task {
-                                await onLoadMore(poster)
+                                onLoadMore(poster)
                             }
 
                             if index != visiblePosters.count - 1 {
@@ -555,13 +567,13 @@ private struct MinePosterListView: View {
                     }
                 }
                 .refreshable {
-                    await onRefresh()
+                    onRefresh()
                 }
             }
         }
         .task {
             if case .idle = status {
-                await onRefresh()
+                onRefresh()
             }
         }
         .background(Color(.systemGroupedBackground))
@@ -574,7 +586,9 @@ private struct MinePosterListView: View {
                     onReport: nil,
                     onDeleted: {
                         deletedPosterIDs.insert(poster.id)
-                        await onRefresh()
+                        Task {
+                            onRefresh()
+                        }
                     }
                 )
             }
@@ -629,7 +643,7 @@ private struct MinePosterListView: View {
             if selectedPoster?.id == poster.id {
                 selectedPoster = nil
             }
-            await onRefresh()
+            onRefresh()
         } catch {
             alert = LoginAlert(title: "删除失败", message: error.localizedDescription)
         }
