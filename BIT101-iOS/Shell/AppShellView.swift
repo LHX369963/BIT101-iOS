@@ -106,9 +106,9 @@ struct AppShellView: View {
     private static let startupNoticeBody = """
     1、将支持扩展到iOS 17
     2、支持使用流量访问绝大部分内容！
-    2、bugfix
-    3、优化稳定性
-    4、修复交互问题
+    3、bugfix
+    4、优化稳定性
+    5、修复交互问题
     """
     private static let widgetUsageGuideTitle = "非常有用的几个用法"
     private static let widgetUsageGuideBody = """
