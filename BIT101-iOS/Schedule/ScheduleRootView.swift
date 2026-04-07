@@ -259,7 +259,7 @@ private struct CourseScheduleTabView: View {
                 VStack(spacing: 16) {
                     Text(activeSchedule.isPrimary ? "还没有课表数据" : "这份分享课表还没有课程")
                         .font(.headline)
-                    Text(activeSchedule.isPrimary ? "请在校园网环境下，获取课表。" : "试试上下滑切换到别的课表，或重新导入一份分享编码。")
+                    Text(activeSchedule.isPrimary ? "请先获取课表。" : "试试上下滑切换到别的课表，或重新导入一份分享课表。")
                         .foregroundStyle(.secondary)
                     if supportsEditingDisplayedSchedule {
                         Button {

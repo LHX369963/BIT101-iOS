@@ -1893,31 +1893,55 @@ private func applyGalleryModerationAction(
 private struct GalleryPosterActionMenu: View {
     let onSelectAction: ((CommunityReportAction) -> Void)?
     let onDelete: (() -> Void)?
+    @State private var isPresentingFallbackActions = false
 
     var body: some View {
-        Menu {
-            if let onSelectAction {
-                Button(CommunityReportAction.hidePoster.title, systemImage: "eye.slash") {
-                    onSelectAction(.hidePoster)
+        Group {
+            if #available(iOS 18.0, *) {
+                Menu {
+                    menuActions
+                } label: {
+                    menuLabel
                 }
-
-                Button(CommunityReportAction.blockUser.title, systemImage: "person.crop.circle.badge.xmark") {
-                    onSelectAction(.blockUser)
+            } else {
+                Button {
+                    isPresentingFallbackActions = true
+                } label: {
+                    menuLabel
+                }
+                .confirmationDialog("", isPresented: $isPresentingFallbackActions, titleVisibility: .hidden) {
+                    menuActions
+                    Button("取消", role: .cancel) {}
                 }
             }
-
-            if let onDelete {
-                Button("删除帖子", systemImage: "trash", role: .destructive) {
-                    onDelete()
-                }
-            }
-        } label: {
-            Image(systemName: "ellipsis.circle")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-                .frame(width: 32, height: 32)
         }
         .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var menuActions: some View {
+        if let onSelectAction {
+            Button(CommunityReportAction.hidePoster.title, systemImage: "eye.slash") {
+                onSelectAction(.hidePoster)
+            }
+
+            Button(CommunityReportAction.blockUser.title, systemImage: "person.crop.circle.badge.xmark") {
+                onSelectAction(.blockUser)
+            }
+        }
+
+        if let onDelete {
+            Button("删除帖子", systemImage: "trash", role: .destructive) {
+                onDelete()
+            }
+        }
+    }
+
+    private var menuLabel: some View {
+        Image(systemName: "ellipsis.circle")
+            .font(.title3)
+            .foregroundStyle(.secondary)
+            .frame(width: 32, height: 32)
     }
 }
 

@@ -11,7 +11,7 @@ import SwiftUI
 import WidgetKit
 
 /// 课表未同步时统一使用的 widget 空态提示。
-private let scheduleWidgetCampusNetworkMessage = "请在校园网环境下，获取课表"
+private let scheduleWidgetCampusNetworkMessage = "请先获取课表"
 /// 未登录时统一使用的 widget 空态提示。
 private let scheduleWidgetLoginMessage = "请登录"
 /// 当后续没有课程时统一使用的 widget 空态提示。

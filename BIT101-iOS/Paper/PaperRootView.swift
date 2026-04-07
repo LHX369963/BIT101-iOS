@@ -525,6 +525,8 @@ private struct PaperSummaryCard: View {
                 Spacer(minLength: 12)
 
                 PaperArticleActionMenu(onHide: onHide)
+                    .contentShape(Rectangle())
+                    .onTapGesture { }
             }
 
             if !paper.intro.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1277,19 +1279,40 @@ private struct PaperCommentBubble: View {
 /// 当前先提供最小能力：本地隐藏本文。
 private struct PaperArticleActionMenu: View {
     let onHide: () -> Void
+    @State private var isPresentingFallbackActions = false
 
     var body: some View {
-        Menu {
-            Button("屏蔽本文", systemImage: "eye.slash") {
-                onHide()
+        Group {
+            if #available(iOS 18.0, *) {
+                Menu {
+                    Button("屏蔽本文", systemImage: "eye.slash") {
+                        onHide()
+                    }
+                } label: {
+                    menuLabel
+                }
+            } else {
+                Button {
+                    isPresentingFallbackActions = true
+                } label: {
+                    menuLabel
+                }
+                .confirmationDialog("", isPresented: $isPresentingFallbackActions, titleVisibility: .hidden) {
+                    Button("屏蔽本文", systemImage: "eye.slash") {
+                        onHide()
+                    }
+                    Button("取消", role: .cancel) {}
+                }
             }
-        } label: {
-            Image(systemName: "ellipsis.circle")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-                .frame(width: 32, height: 32)
         }
         .buttonStyle(.plain)
+    }
+
+    private var menuLabel: some View {
+        Image(systemName: "ellipsis.circle")
+            .font(.title3)
+            .foregroundStyle(.secondary)
+            .frame(width: 32, height: 32)
     }
 }
 

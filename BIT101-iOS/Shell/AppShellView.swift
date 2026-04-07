@@ -104,10 +104,11 @@ enum AppTab: String, Identifiable, Codable {
 struct AppShellView: View {
     private static let startupNoticeTitle = "1.4.0版本更新"
     private static let startupNoticeBody = """
-    1、支持 iOS 17，覆盖更广泛的平台与设备
+    1、将支持扩展到iOS 17
+    2、支持使用流量访问绝大部分内容！
     2、bugfix
-    3、优化话廊与文章页面的兼容性和稳定性
-    4、修复若干详情页、评论区与交互问题
+    3、优化稳定性
+    4、修复交互问题
     """
     private static let widgetUsageGuideTitle = "非常有用的几个用法"
     private static let widgetUsageGuideBody = """
