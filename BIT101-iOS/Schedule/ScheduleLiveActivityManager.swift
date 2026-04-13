@@ -12,25 +12,6 @@ import Foundation
 import os
 import UserNotifications
 
-/// 课程提醒 Live Activity 的固定属性。
-struct CourseReminderActivityAttributes: ActivityAttributes {
-    /// 锁屏 / 灵动岛展示所需的最小动态状态。
-    ///
-    /// 这里故意只保留“提醒对象是谁”和“倒计时指向哪个未来时间点”，
-    /// 不再把整节课时长、当前进度之类信息带进来，避免状态比较和更新链路
-    /// 因为无关字段变化而变复杂。
-    public struct ContentState: Codable, Hashable {
-        let kindText: String
-        let title: String
-        let classroom: String
-        let teacher: String
-        let timeRangeText: String
-        let countdownTargetDate: Date
-    }
-
-    let studentID: String
-}
-
 /// 内部使用的临时结构，用于逻辑计算。
 private struct CourseReminderOccurrence {
     let kindText: String

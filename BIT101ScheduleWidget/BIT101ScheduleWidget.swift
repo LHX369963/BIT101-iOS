@@ -16,146 +16,6 @@ private let scheduleWidgetCampusNetworkMessage = "请先获取课表"
 private let scheduleWidgetLoginMessage = "请登录"
 /// 当后续没有课程时统一使用的 widget 空态提示。
 private let scheduleWidgetRestMessage = "课已经上完，好好休息"
-/// 当前课在 widget 中继续占据首位的最长时长。
-///
-/// 超过这段时间后，如果后面还有课，就优先展示“下一节”，给 WidgetKit 的非准点刷新留出余量。
-private let scheduleWidgetCurrentCourseDisplayDuration: TimeInterval = 5 * 60
-
-/// 课表小组件与主 App 共享的 App Group 标识。
-///
-/// widget extension 无法直接访问主 App 沙盒，因此必须通过 App Group 共享一份精简快照。
-private enum ScheduleWidgetSharedContainer {
-    static let identifier = "group.BIT101-dev.BIT101-iOS.shared"
-}
-
-/// 从共享容器读取的精简节次模型。
-///
-/// 这是 widget 侧自己的镜像模型，故意不直接依赖主 app target 里的类型定义。
-private struct ScheduleWidgetTimeSlotSnapshot: Codable {
-    let id: Int
-    let start: String
-    let end: String
-}
-
-/// 从共享容器读取的精简课程模型。
-///
-/// 只保留 widget 展示“下一节课/后续课程”所需字段，尽量压缩共享数据体积。
-private struct ScheduleWidgetCourseSnapshot: Codable {
-    let id: String
-    let name: String
-    let classroom: String
-    let teacher: String
-    let weeks: [Int]
-    let weekday: Int
-    let startSection: Int
-    let endSection: Int
-}
-
-/// 小组件共享课表快照。
-///
-/// 主 app 写、widget 读，只要这份结构稳定，两边就可以独立演进 UI。
-private struct ScheduleWidgetSnapshot: Codable {
-    let isLoggedIn: Bool
-    let firstDayString: String
-    let timeTable: [ScheduleWidgetTimeSlotSnapshot]
-    let courses: [ScheduleWidgetCourseSnapshot]
-}
-
-/// 课程提醒 Live Activity 的固定属性。
-struct CourseReminderActivityAttributes: ActivityAttributes {
-    /// Live Activity 的动态显示内容。
-    ///
-    /// 这里只保留锁屏和灵动岛真正需要的最小字段：
-    /// - `kindText` 用于区分“上课/日程”
-    /// - `title` 用于展示提醒标题
-    /// - `classroom/teacher` 用于锁屏态副标题兜底
-    /// - `countdownTargetDate` 是唯一参与倒计时的时间点
-    ///
-    /// 当前实现明确只做“课前提醒”，因此展示层不再依赖课程时长，
-    /// 只需要知道“倒计时应该指向哪一个未来时间”。
-    public struct ContentState: Codable, Hashable {
-        let kindText: String
-        let title: String
-        let classroom: String
-        let teacher: String
-        let timeRangeText: String
-        let countdownTargetDate: Date
-    }
-
-    let studentID: String
-}
-
-/// 供 Widget 时间线使用的单节课程实例。
-///
-/// 这是从共享快照展开后的“真实课程 occurrence”，已经具备开始/结束时间，可直接参与排序和时间线刷新。
-private struct ScheduleWidgetOccurrence: Identifiable {
-    let id: String
-    let title: String
-    let classroom: String
-    let teacher: String
-    let startDate: Date
-    let endDate: Date
-    let displayUntilDate: Date
-
-    var isCurrent: Bool {
-        let now = Date()
-        return startDate <= now && now < displayUntilDate
-    }
-
-    var countdownTargetDate: Date {
-        isCurrent ? displayUntilDate : startDate
-    }
-
-    var rangeText: String {
-        "\(Self.timeFormatter.string(from: startDate))-\(Self.timeFormatter.string(from: endDate))"
-    }
-
-    var shortDateText: String {
-        Self.dateFormatter.string(from: startDate)
-    }
-
-    var relativeDayText: String {
-        let startOfToday = Self.calendar.startOfDay(for: Date())
-        let startOfClassDay = Self.calendar.startOfDay(for: startDate)
-        let dayDiff = Self.calendar.dateComponents([.day], from: startOfToday, to: startOfClassDay).day ?? 0
-
-        switch dayDiff {
-        case ...0:
-            return "今天"
-        case 1:
-            return "明天"
-        case 2:
-            return "后天"
-        case 3:
-            return "大后天"
-        default:
-            return shortDateText
-        }
-    }
-
-    private static let calendar: Calendar = {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600) ?? .current
-        return calendar
-    }()
-
-    private static let timeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
-        formatter.dateFormat = "HH:mm"
-        return formatter
-    }()
-
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
-        formatter.dateFormat = "M月d日"
-        return formatter
-    }()
-}
-
 @available(iOSApplicationExtension 16.2, *)
 /// 课程提醒 Live Activity 配置。
 ///
@@ -318,7 +178,7 @@ private struct LiveActivityTimerText: View {
 /// 一个时间线条目里既可能有后续课程，也可能只有一条空态消息。
 private struct ScheduleWidgetEntry: TimelineEntry {
     let date: Date
-    let nextOccurrences: [ScheduleWidgetOccurrence]
+    let nextOccurrences: [ScheduleExternalOccurrence]
     let message: String?
 }
 
@@ -328,7 +188,7 @@ private struct ScheduleWidgetProvider: TimelineProvider {
         ScheduleWidgetEntry(
             date: Date(),
             nextOccurrences: [
-                ScheduleWidgetOccurrence(
+                ScheduleExternalOccurrence(
                     id: "preview-next",
                     title: "高等数学",
                     classroom: "理教201",
@@ -337,7 +197,7 @@ private struct ScheduleWidgetProvider: TimelineProvider {
                     endDate: Date().addingTimeInterval(110 * 60),
                     displayUntilDate: Date().addingTimeInterval(110 * 60)
                 ),
-                ScheduleWidgetOccurrence(
+                ScheduleExternalOccurrence(
                     id: "preview-later",
                     title: "大学英语",
                     classroom: "文萃302",
@@ -364,7 +224,7 @@ private struct ScheduleWidgetProvider: TimelineProvider {
     }
 
     private func loadEntry() -> ScheduleWidgetEntry {
-        guard let snapshot = loadSnapshot() else {
+        guard let snapshot = ScheduleExternalSnapshotStore.load() else {
             return emptyEntry(message: scheduleWidgetCampusNetworkMessage)
         }
 
@@ -372,7 +232,7 @@ private struct ScheduleWidgetProvider: TimelineProvider {
             return emptyEntry(message: scheduleWidgetLoginMessage)
         }
 
-        guard let firstDay = Self.parseDate(snapshot.firstDayString) else {
+        guard ScheduleOccurrenceResolver.parseDate(snapshot.firstDayString) != nil else {
             return emptyEntry(message: scheduleWidgetCampusNetworkMessage)
         }
 
@@ -380,7 +240,7 @@ private struct ScheduleWidgetProvider: TimelineProvider {
             return emptyEntry(message: scheduleWidgetCampusNetworkMessage)
         }
 
-        let occurrences = buildUpcomingOccurrences(from: snapshot, firstDay: firstDay)
+        let occurrences = ScheduleOccurrenceResolver.upcomingOccurrences(from: snapshot)
         let message = occurrences.isEmpty ? scheduleWidgetRestMessage : nil
 
         return ScheduleWidgetEntry(
@@ -399,105 +259,6 @@ private struct ScheduleWidgetProvider: TimelineProvider {
         )
     }
 
-    /// 从共享容器读取主 App 导出的课表快照。
-    private func loadSnapshot() -> ScheduleWidgetSnapshot? {
-        guard
-            let containerURL = FileManager.default.containerURL(
-                forSecurityApplicationGroupIdentifier: ScheduleWidgetSharedContainer.identifier
-            )
-        else {
-            return nil
-        }
-
-        let fileURL = containerURL
-            .appending(path: "Widgets", directoryHint: .isDirectory)
-            .appending(path: "schedule-widget-snapshot.json")
-
-        guard
-            let data = try? Data(contentsOf: fileURL)
-        else {
-            return nil
-        }
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try? decoder.decode(ScheduleWidgetSnapshot.self, from: data)
-    }
-
-    /// 把精简快照展开成“当前时刻仍应展示的课程实例”。
-    ///
-    /// 规则是：
-    /// - 开课前正常显示这节课
-    /// - 开课后前 5 分钟仍允许显示“当前课”
-    /// - 超过 5 分钟后，如果后面还有课，就直接切到“下一节”
-    /// - 如果这已经是最后一节课，则继续显示到下课
-    private func buildUpcomingOccurrences(
-        from snapshot: ScheduleWidgetSnapshot,
-        firstDay: Date
-    ) -> [ScheduleWidgetOccurrence] {
-        let now = Date()
-        let slotMap = Dictionary(uniqueKeysWithValues: snapshot.timeTable.map { ($0.id, $0) })
-
-        let rawOccurrences = snapshot.courses
-            .flatMap { course in
-                course.weeks.compactMap { week -> ScheduleWidgetOccurrence? in
-                    guard
-                        let startSlot = slotMap[course.startSection],
-                        let endSlot = slotMap[course.endSection],
-                        let startDate = Self.combine(date: firstDay, week: week, weekday: course.weekday, time: startSlot.start),
-                        let endDate = Self.combine(date: firstDay, week: week, weekday: course.weekday, time: endSlot.end),
-                        endDate > now
-                    else {
-                        return nil
-                    }
-
-                    return ScheduleWidgetOccurrence(
-                        id: "\(course.id)-\(week)",
-                        title: Self.normalizeCourseTitle(course.name),
-                        classroom: Self.normalizeClassroom(course.classroom),
-                        teacher: course.teacher,
-                        startDate: startDate,
-                        endDate: endDate,
-                        displayUntilDate: endDate
-                    )
-                }
-            }
-            .sorted { lhs, rhs in
-                if lhs.startDate != rhs.startDate {
-                    return lhs.startDate < rhs.startDate
-                }
-                return lhs.title < rhs.title
-            }
-
-        return rawOccurrences.enumerated().compactMap { index, occurrence in
-            let hasLaterOccurrence = rawOccurrences.indices.contains(index + 1)
-            let displayUntilDate: Date
-
-            if hasLaterOccurrence {
-                displayUntilDate = min(
-                    occurrence.endDate,
-                    occurrence.startDate.addingTimeInterval(scheduleWidgetCurrentCourseDisplayDuration)
-                )
-            } else {
-                displayUntilDate = occurrence.endDate
-            }
-
-            guard displayUntilDate > now else {
-                return nil
-            }
-
-            return ScheduleWidgetOccurrence(
-                id: occurrence.id,
-                title: occurrence.title,
-                classroom: occurrence.classroom,
-                teacher: occurrence.teacher,
-                startDate: occurrence.startDate,
-                endDate: occurrence.endDate,
-                displayUntilDate: displayUntilDate
-            )
-        }
-    }
-
     /// 计算 widget 下一次需要刷新的时间点。
     ///
     /// 优先在最近一节课的开始/切换节点刷新；没有课程时再走兜底刷新。
@@ -514,59 +275,6 @@ private struct ScheduleWidgetProvider: TimelineProvider {
 
         return Calendar.current.date(byAdding: .minute, value: 30, to: now) ?? now.addingTimeInterval(1800)
     }
-
-    /// 解析共享快照里的首周日期。
-    private static func parseDate(_ string: String) -> Date? {
-        guard !string.isEmpty else { return nil }
-        return dateFormatter.date(from: string)
-    }
-
-    /// 把教学周 + 星期 + 节次时间展开成真实上课时间。
-    private static func combine(date firstDay: Date, week: Int, weekday: Int, time: String) -> Date? {
-        let dayOffset = (week - 1) * 7 + (weekday - 1)
-        guard let day = calendar.date(byAdding: .day, value: dayOffset, to: firstDay) else {
-            return nil
-        }
-
-        let parts = time.split(separator: ":")
-        guard parts.count == 2, let hour = Int(parts[0]), let minute = Int(parts[1]) else {
-            return nil
-        }
-
-        var components = calendar.dateComponents([.year, .month, .day], from: day)
-        components.hour = hour
-        components.minute = minute
-        components.second = 0
-        return calendar.date(from: components)
-    }
-
-    private static func normalizeClassroom(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "理教楼", with: "理教")
-            .replacingOccurrences(of: "文萃楼", with: "文萃")
-    }
-
-    private static func normalizeCourseTitle(_ value: String) -> String {
-        if value.hasPrefix("体育/") {
-            return String(value.dropFirst("体育/".count))
-        }
-        return value
-    }
-
-    private static let calendar: Calendar = {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600) ?? .current
-        return calendar
-    }()
-
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
-    }()
 }
 
 /// 课程表小组件主体。
@@ -617,13 +325,13 @@ private struct ScheduleWidgetEntryView: View {
         VStack(alignment: .leading, spacing: 6) {
             if let first = entry.nextOccurrences.first {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(first.isCurrent ? "正在上课" : "下一节")
+                    Text(first.isCurrent() ? "正在上课" : "下一节")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
                     Spacer(minLength: 0)
 
-                    Text(first.relativeDayText)
+                    Text(first.relativeDayText())
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(.tertiary)
                 }
@@ -661,13 +369,13 @@ private struct ScheduleWidgetEntryView: View {
             if let first = entry.nextOccurrences.first {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(first.isCurrent ? "正在上课" : "下一节")
+                        Text(first.isCurrent() ? "正在上课" : "下一节")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
 
                         Spacer(minLength: 0)
 
-                        Text(first.relativeDayText)
+                        Text(first.relativeDayText())
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     }
@@ -693,7 +401,7 @@ private struct ScheduleWidgetEntryView: View {
     private var accessoryInlineBody: some View {
         Group {
             if let first = entry.nextOccurrences.first {
-                Text("\(first.isCurrent ? "正在上课" : "下一节") \(first.title)")
+                Text("\(first.isCurrent() ? "正在上课" : "下一节") \(first.title)")
                     .lineLimit(1)
             } else {
                 Text(accessoryEmptyText)
@@ -709,7 +417,7 @@ private struct ScheduleWidgetEntryView: View {
 
             if let first = entry.nextOccurrences.first {
                 VStack(spacing: 1) {
-                    Image(systemName: first.isCurrent ? "play.circle.fill" : "calendar.badge.clock")
+                    Image(systemName: first.isCurrent() ? "play.circle.fill" : "calendar.badge.clock")
                         .font(.caption2)
                     Text(circularCountdownText(for: first))
                         .font(.system(size: 10, weight: .semibold, design: .rounded))
@@ -733,13 +441,13 @@ private struct ScheduleWidgetEntryView: View {
             if let first = entry.nextOccurrences.first {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(first.isCurrent ? "正在上课" : "下一节")
+                        Text(first.isCurrent() ? "正在上课" : "下一节")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
                         Spacer(minLength: 0)
 
-                        Text(first.relativeDayText)
+                        Text(first.relativeDayText())
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(.tertiary)
                     }
@@ -797,13 +505,13 @@ private struct ScheduleWidgetEntryView: View {
             if let first = entry.nextOccurrences.first {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(first.isCurrent ? "正在上课" : "下一节")
+                        Text(first.isCurrent() ? "正在上课" : "下一节")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
                         Spacer(minLength: 0)
 
-                        Text(first.relativeDayText)
+                        Text(first.relativeDayText())
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(.tertiary)
                     }
@@ -870,7 +578,7 @@ private struct ScheduleWidgetEntryView: View {
     }
 
     /// 大号组件主课的地点/老师摘要。
-    private func primaryMetaText(for occurrence: ScheduleWidgetOccurrence) -> String {
+    private func primaryMetaText(for occurrence: ScheduleExternalOccurrence) -> String {
         if !occurrence.classroom.isEmpty && !occurrence.teacher.isEmpty {
             return "\(occurrence.classroom) · \(occurrence.teacher)"
         }
@@ -881,7 +589,7 @@ private struct ScheduleWidgetEntryView: View {
     }
 
     /// 后续课程的次级摘要。
-    private func secondaryMetaText(for occurrence: ScheduleWidgetOccurrence) -> String {
+    private func secondaryMetaText(for occurrence: ScheduleExternalOccurrence) -> String {
         if !occurrence.classroom.isEmpty {
             return occurrence.classroom
         }
@@ -889,7 +597,7 @@ private struct ScheduleWidgetEntryView: View {
     }
 
     /// 锁屏长条组件的辅助摘要。
-    private func accessoryMetaText(for occurrence: ScheduleWidgetOccurrence) -> String {
+    private func accessoryMetaText(for occurrence: ScheduleExternalOccurrence) -> String {
         if !occurrence.classroom.isEmpty {
             return "\(occurrence.rangeText) \(occurrence.classroom)"
         }
@@ -897,8 +605,8 @@ private struct ScheduleWidgetEntryView: View {
     }
 
     /// 锁屏圆形组件里展示的分钟数倒计时。
-    private func circularCountdownText(for occurrence: ScheduleWidgetOccurrence) -> String {
-        let target = occurrence.countdownTargetDate
+    private func circularCountdownText(for occurrence: ScheduleExternalOccurrence) -> String {
+        let target = occurrence.countdownTargetDate()
         let seconds = max(0, Int(target.timeIntervalSince(Date())))
         let minutes = max(1, Int(ceil(Double(seconds) / 60.0)))
         return "\(minutes)分"

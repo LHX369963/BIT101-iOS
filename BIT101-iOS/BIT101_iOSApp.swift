@@ -9,6 +9,88 @@ import SwiftUI
 import BackgroundTasks
 import UIKit
 
+/// 每日首次进入应用时的静默 DDL 同步协调器。
+///
+/// 目标：
+/// - 只在当天第一次进入 app 时尝试一次
+/// - 不打断前台，不弹成功/失败提示
+/// - 仅对“已经启用过乐学 DDL”的账号生效，避免从未使用过 DDL 的用户被动发起请求
+enum DDLSilentRefreshCoordinator {
+    private static let defaults = UserDefaults.standard
+    private static let lastAttemptKeyPrefix = "schedule.ddl.silent-refresh.last-attempt"
+    private static let gate = Gate()
+
+    /// 防止启动、回前台、登录态变化等多个入口在同一时刻重复发起静默同步。
+    private actor Gate {
+        private var activeStudentIDs: Set<String> = []
+
+        func runIfNeeded(for studentID: String, operation: @Sendable () async -> Void) async {
+            guard activeStudentIDs.insert(studentID).inserted else { return }
+            defer { activeStudentIDs.remove(studentID) }
+            await operation()
+        }
+    }
+
+    /// 在合适时机尝试静默同步当日 DDL。
+    ///
+    /// 调用方不需要关心“今天是否已经试过”或“当前是否有其它入口正在同步”；
+    /// 这些约束统一由协调器内部处理。
+    static func refreshIfNeeded(trigger: String) {
+        Task(priority: .utility) {
+            let fakeCookie = LoginStorage.shared.fakeCookie.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !fakeCookie.isEmpty else { return }
+
+            let studentID = LoginStorage.shared.currentStudentID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !studentID.isEmpty else { return }
+
+            await gate.runIfNeeded(for: studentID) {
+                let cache = ScheduleCacheStore.load()
+                let hasLexueSyncHistory =
+                    !cache.lexueCalendarURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                    cache.ddlEvents.contains(where: { $0.group == "lexue" })
+                guard hasLexueSyncHistory else { return }
+
+                let attemptKey = "\(lastAttemptKeyPrefix).\(studentID)"
+                let todayStamp = dayStamp(for: Date())
+                guard defaults.string(forKey: attemptKey) != todayStamp else { return }
+
+                // 这里按“尝试一次”记账，而不是按“成功一次”记账。
+                // 用户要求的是“当天首次进入 app 时静默拉取一次”，而不是失败后反复重试。
+                defaults.set(todayStamp, forKey: attemptKey)
+
+                do {
+                    let service = ScheduleService()
+                    let manualEvents = cache.ddlEvents.filter { $0.group != "lexue" }
+                    let payload = try await service.syncDDLEvents(
+                        existingEvents: cache.ddlEvents,
+                        storedURL: cache.lexueCalendarURL
+                    )
+
+                    var updatedCache = cache
+                    updatedCache.lexueCalendarURL = payload.url
+                    updatedCache.ddlEvents = (manualEvents + payload.events).sorted { $0.dueAt < $1.dueAt }
+                    ScheduleCacheStore.save(updatedCache)
+                } catch {
+                    // 静默同步失败不打断前台，也不弹提示。
+                    _ = trigger
+                }
+            }
+        }
+    }
+
+    /// 生成“本地自然日”粒度的日期戳。
+    ///
+    /// 使用当前时区的 `yyyy-MM-dd`，确保“每天一次”的判定和用户体感一致。
+    private static func dayStamp(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+}
+
 /// 统一管理应用允许的方向集合。
 ///
 /// 项目默认只允许竖屏；当用户在设置里打开自动旋转时，再放开系统旋转。
@@ -186,12 +268,17 @@ struct BIT101_iOSApp: App {
                     AppOrientationController.applyPreference(autoRotate: newValue)
                 }
                 .task {
+                    // 启动后先激活 WatchConnectivity，保证 watch 端发来的“重新同步”请求有人接。
+                    WatchScheduleSyncManager.shared.activateIfNeeded()
+
                     // 启动时补做一次导出与提醒刷新，保证外部展示拿到的是当前账号的最新缓存。
                     refreshScheduleExternalDisplays(trigger: "app_launch_task", syncWidgetSnapshot: true)
+                    DDLSilentRefreshCoordinator.refreshIfNeeded(trigger: "app_launch_task")
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .loginStorageDidChange)) { _ in
                     // 切换账号后，组件和灵动岛必须立即改读新账号的缓存。
                     refreshScheduleExternalDisplays(trigger: "login_storage_changed", syncWidgetSnapshot: true)
+                    DDLSilentRefreshCoordinator.refreshIfNeeded(trigger: "login_storage_changed")
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .scheduleCacheDidChange)) { _ in
                     // 这里主要负责刷新 Live Activity。
@@ -204,6 +291,7 @@ struct BIT101_iOSApp: App {
                 // 应用重新回到前台时，同时补做一次 widget 快照导出与时间线刷新。
                 // 否则即便用户主动打开 app，桌面/锁屏小组件也可能继续沿用后台停留期间的旧条目。
                 refreshScheduleExternalDisplays(trigger: "scene_active", syncWidgetSnapshot: true)
+                DDLSilentRefreshCoordinator.refreshIfNeeded(trigger: "scene_active")
             }
         }
     }
