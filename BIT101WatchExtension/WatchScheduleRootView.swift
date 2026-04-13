@@ -55,15 +55,15 @@ struct WatchScheduleRootView: View {
                         }
 
                         Text(next.title)
-                            .font(.title)
+                            .font(.title2)
                             .lineLimit(2)
 
                         Text(next.rangeText)
-                            .font(.title)
+                            .font(.title2)
 
                         if !next.classroom.isEmpty {
                             Text(next.classroom)
-                                .font(.title)
+                                .font(.title2)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }

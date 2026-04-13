@@ -25,12 +25,12 @@
 		B979F16E6900E1E884772F00 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C87F2B27CDB14AC63D666139 /* Foundation.framework */; };
 		C0683505889D51D1ED727339 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F8E44554F89A8994A3C6A41E /* Assets.xcassets */; };
 		C8618324F1CB0A8EB9CB55F9 /* BIT101ScheduleWidgetBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66582305EDF75198F3070B6C /* BIT101ScheduleWidgetBundle.swift */; };
-		CDDB7CC9D6C32483E0E54C0E /* BIT101WatchExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = E8DFA667ABC75C6810BC0A6B /* BIT101WatchExtension.appex */; };
+		CDDB7CC9D6C32483E0E54C0E /* BIT101WatchExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = E8DFA667ABC75C6810BC0A6B /* BIT101WatchExtension.appex */; };
 		D6E1110C49C701CB6C8B3080 /* BIT101Watch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 027903073181F16453D11398 /* BIT101Watch.app */; };
 		E89B1AAE46D4FFA1A056C483 /* ScheduleSharedLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CF4896F51E6C19BBE15048C /* ScheduleSharedLiveActivity.swift */; };
-		E8DF51F6326A8FA9797F82E9 /* BIT101WatchWidgets.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 6C427FABBA6FB6C2CF4098BE /* BIT101WatchWidgets.appex */; };
+		E8DF51F6326A8FA9797F82E9 /* BIT101WatchWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 6C427FABBA6FB6C2CF4098BE /* BIT101WatchWidgets.appex */; };
 		F52E9C051CAF65D91825FB7A /* WatchScheduleRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A6C2ACF3AF5C705FD407FBA /* WatchScheduleRootView.swift */; };
-		F65927450E15455FB026D9C1 /* BIT101ScheduleWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 0382F3A6842C7256F74D4FCC /* BIT101ScheduleWidget.appex */; platformFilter = ios; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		F65927450E15455FB026D9C1 /* BIT101ScheduleWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0382F3A6842C7256F74D4FCC /* BIT101ScheduleWidget.appex */; platformFilter = ios; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -65,15 +65,15 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
-		524910F6664E97D0AD2254A6 /* Embed App Extensions */ = {
+		524910F6664E97D0AD2254A6 /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				F65927450E15455FB026D9C1 /* BIT101ScheduleWidget.appex in Embed App Extensions */,
+				F65927450E15455FB026D9C1 /* BIT101ScheduleWidget.appex in Embed Foundation Extensions */,
 			);
-			name = "Embed App Extensions";
+			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		7DE3E2E83612E965A2BA07B0 /* Embed Watch Content */ = {
@@ -87,16 +87,16 @@
 			name = "Embed Watch Content";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		FC107DF24576CD610F4804F3 /* Embed App Extensions */ = {
+		FC107DF24576CD610F4804F3 /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				E8DF51F6326A8FA9797F82E9 /* BIT101WatchWidgets.appex in Embed App Extensions */,
-				CDDB7CC9D6C32483E0E54C0E /* BIT101WatchExtension.appex in Embed App Extensions */,
+				E8DF51F6326A8FA9797F82E9 /* BIT101WatchWidgets.appex in Embed Foundation Extensions */,
+				CDDB7CC9D6C32483E0E54C0E /* BIT101WatchExtension.appex in Embed Foundation Extensions */,
 			);
-			name = "Embed App Extensions";
+			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXCopyFilesBuildPhase section */
@@ -760,7 +760,7 @@
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
-				ONLY_ACTIVE_ARCH = NO;
+				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";

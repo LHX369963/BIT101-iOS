@@ -17,19 +17,19 @@ final class WatchScheduleSyncManager: NSObject, WCSessionDelegate {
     static let shared = WatchScheduleSyncManager()
 
     private enum PayloadKey {
-        static let snapshotData = "schedule_external_snapshot_data"
-        static let requestLatestSnapshot = "request_latest_schedule_snapshot"
+        nonisolated static let snapshotData = "schedule_external_snapshot_data"
+        nonisolated static let requestLatestSnapshot = "request_latest_schedule_snapshot"
     }
 
-    private static let requestData = Data("request_latest_schedule_snapshot".utf8)
+    nonisolated private static let requestData = Data("request_latest_schedule_snapshot".utf8)
 
-    private static let encoder: JSONEncoder = {
+    nonisolated private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         return encoder
     }()
 
-    private static let decoder: JSONDecoder = {
+    nonisolated private static let decoder: JSONDecoder = {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder
@@ -138,17 +138,19 @@ final class WatchScheduleSyncManager: NSObject, WCSessionDelegate {
     ) {
         #if os(iOS)
         if messageData == Self.requestData {
-            if let snapshot = ScheduleExternalSnapshotStore.load(), let data = try? Self.encoder.encode(snapshot) {
-                do {
-                    try session.updateApplicationContext([
-                        PayloadKey.snapshotData: data,
-                    ])
-                } catch {}
-                replyHandler(data)
-                return
-            }
+            Task { @MainActor in
+                if let snapshot = ScheduleExternalSnapshotStore.load(), let data = try? Self.encoder.encode(snapshot) {
+                    do {
+                        try session.updateApplicationContext([
+                            PayloadKey.snapshotData: data,
+                        ])
+                    } catch {}
+                    replyHandler(data)
+                    return
+                }
 
-            replyHandler(Data())
+                replyHandler(Data())
+            }
             return
         }
         #endif
@@ -163,18 +165,20 @@ final class WatchScheduleSyncManager: NSObject, WCSessionDelegate {
     ) {
         #if os(iOS)
         if let shouldPush = message[PayloadKey.requestLatestSnapshot] as? Bool, shouldPush {
-            let payload: [String: Any]
-            if let snapshot = ScheduleExternalSnapshotStore.load(), let data = try? Self.encoder.encode(snapshot) {
-                do {
-                    try session.updateApplicationContext([
-                        PayloadKey.snapshotData: data,
-                    ])
-                } catch {}
-                payload = [PayloadKey.snapshotData: data]
-            } else {
-                payload = [:]
+            Task { @MainActor in
+                let payload: [String: Any]
+                if let snapshot = ScheduleExternalSnapshotStore.load(), let data = try? Self.encoder.encode(snapshot) {
+                    do {
+                        try session.updateApplicationContext([
+                            PayloadKey.snapshotData: data,
+                        ])
+                    } catch {}
+                    payload = [PayloadKey.snapshotData: data]
+                } else {
+                    payload = [:]
+                }
+                replyHandler(payload)
             }
-            replyHandler(payload)
             return
         }
         #endif

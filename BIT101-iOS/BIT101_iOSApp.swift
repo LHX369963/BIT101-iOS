@@ -16,8 +16,7 @@ import UIKit
 /// - 不打断前台，不弹成功/失败提示
 /// - 仅对“已经启用过乐学 DDL”的账号生效，避免从未使用过 DDL 的用户被动发起请求
 enum DDLSilentRefreshCoordinator {
-    private static let defaults = UserDefaults.standard
-    private static let lastAttemptKeyPrefix = "schedule.ddl.silent-refresh.last-attempt"
+    nonisolated private static let lastAttemptKeyPrefix = "schedule.ddl.silent-refresh.last-attempt"
     private static let gate = Gate()
 
     /// 防止启动、回前台、登录态变化等多个入口在同一时刻重复发起静默同步。
@@ -35,16 +34,19 @@ enum DDLSilentRefreshCoordinator {
     ///
     /// 调用方不需要关心“今天是否已经试过”或“当前是否有其它入口正在同步”；
     /// 这些约束统一由协调器内部处理。
-    static func refreshIfNeeded(trigger: String) {
+    nonisolated static func refreshIfNeeded(trigger: String) {
         Task(priority: .utility) {
-            let fakeCookie = LoginStorage.shared.fakeCookie.trimmingCharacters(in: .whitespacesAndNewlines)
+            let (fakeCookie, studentID) = await MainActor.run {
+                (
+                    LoginStorage.shared.fakeCookie.trimmingCharacters(in: .whitespacesAndNewlines),
+                    LoginStorage.shared.currentStudentID.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            }
             guard !fakeCookie.isEmpty else { return }
-
-            let studentID = LoginStorage.shared.currentStudentID.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !studentID.isEmpty else { return }
 
             await gate.runIfNeeded(for: studentID) {
-                let cache = ScheduleCacheStore.load()
+                let cache = await MainActor.run { ScheduleCacheStore.load() }
                 let hasLexueSyncHistory =
                     !cache.lexueCalendarURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
                     cache.ddlEvents.contains(where: { $0.group == "lexue" })
@@ -52,14 +54,14 @@ enum DDLSilentRefreshCoordinator {
 
                 let attemptKey = "\(lastAttemptKeyPrefix).\(studentID)"
                 let todayStamp = dayStamp(for: Date())
-                guard defaults.string(forKey: attemptKey) != todayStamp else { return }
+                guard UserDefaults.standard.string(forKey: attemptKey) != todayStamp else { return }
 
                 // 这里按“尝试一次”记账，而不是按“成功一次”记账。
                 // 用户要求的是“当天首次进入 app 时静默拉取一次”，而不是失败后反复重试。
-                defaults.set(todayStamp, forKey: attemptKey)
+                UserDefaults.standard.set(todayStamp, forKey: attemptKey)
 
                 do {
-                    let service = ScheduleService()
+                    let service = await MainActor.run { ScheduleService() }
                     let manualEvents = cache.ddlEvents.filter { $0.group != "lexue" }
                     let payload = try await service.syncDDLEvents(
                         existingEvents: cache.ddlEvents,
@@ -69,7 +71,8 @@ enum DDLSilentRefreshCoordinator {
                     var updatedCache = cache
                     updatedCache.lexueCalendarURL = payload.url
                     updatedCache.ddlEvents = (manualEvents + payload.events).sorted { $0.dueAt < $1.dueAt }
-                    ScheduleCacheStore.save(updatedCache)
+                    let cacheToSave = updatedCache
+                    await MainActor.run { ScheduleCacheStore.save(cacheToSave) }
                 } catch {
                     // 静默同步失败不打断前台，也不弹提示。
                     _ = trigger
@@ -81,7 +84,7 @@ enum DDLSilentRefreshCoordinator {
     /// 生成“本地自然日”粒度的日期戳。
     ///
     /// 使用当前时区的 `yyyy-MM-dd`，确保“每天一次”的判定和用户体感一致。
-    private static func dayStamp(for date: Date) -> String {
+    nonisolated private static func dayStamp(for date: Date) -> String {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
