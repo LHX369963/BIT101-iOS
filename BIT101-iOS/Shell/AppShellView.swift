@@ -102,13 +102,13 @@ enum AppTab: String, Identifiable, Codable {
 ///
 /// 壳层只关心两件事：按照设置中心决定展示哪些 tab，以及把退出登录回调继续往下传。
 struct AppShellView: View {
-    private static let startupNoticeTitle = "1.4.0版本更新"
+    private static let startupNoticeTitle = "1.5.0版本更新"
     private static let startupNoticeBody = """
-    1、将支持扩展到iOS 17
-    2、支持使用流量访问绝大部分内容！
-    3、bugfix
-    4、优化稳定性
-    5、修复交互问题
+    1、新增 Apple Watch 版
+    2、支持在手表上查看当前课程、下一节课和后续课表
+    3、支持 Smart Stack 小组件，抬腕即可快速查看课表
+    4、优化同步与稳定性
+    5、修复若干已知问题
     """
     private static let widgetUsageGuideTitle = "非常有用的几个用法"
     private static let widgetUsageGuideBody = """
