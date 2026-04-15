@@ -1,5 +1,109 @@
 import Foundation
 
+/// 日程相关跨 target 共用的展示规范化工具。
+///
+/// 当前主要收口两类“看起来一样、但之前散落在多处”的规则：
+/// - 教室名称缩写
+/// - 课程标题压缩
+///
+/// 这样主 App、widget、watch、Live Activity 后续只需要维护这一份展示约定。
+enum ScheduleDisplayNormalizer {
+    /// 压缩教室名称里的冗长楼名，提升小屏与卡片场景下的可读性。
+    static func normalizeClassroom(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "理教楼", with: "理教")
+            .replacingOccurrences(of: "文萃楼", with: "文萃")
+    }
+
+    /// 对课程标题做本地展示优化。
+    ///
+    /// 目前主要把 `体育/xx` 压缩成 `xx`。
+    static func normalizeCourseTitle(_ value: String) -> String {
+        if value.hasPrefix("体育/") {
+            return String(value.dropFirst("体育/".count))
+        }
+        return value
+    }
+}
+
+/// 日程相关跨 target 共用的日期编解码与时间组合工具。
+///
+/// 共享层、小组件、watch、Live Activity 都依赖同一套“日期字符串 / 节次时间 -> 绝对时间”
+/// 的规则，因此把重叠部分统一收口到这里，避免多个模块各自维护一份。
+enum ScheduleSharedDateCodec {
+    /// 固定使用公历，避免系统日历设置影响周数计算。
+    static let calendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600) ?? .current
+        return calendar
+    }()
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    private static let shortDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+        formatter.dateFormat = "M月d日"
+        return formatter
+    }()
+
+    static func parseDate(_ string: String) -> Date? {
+        guard !string.isEmpty else { return nil }
+        return dateFormatter.date(from: string)
+    }
+
+    static func formatDate(_ date: Date) -> String {
+        dateFormatter.string(from: date)
+    }
+
+    static func formatTime(_ date: Date) -> String {
+        timeFormatter.string(from: date)
+    }
+
+    static func formatShortDate(_ date: Date) -> String {
+        shortDateFormatter.string(from: date)
+    }
+
+    static func combine(firstDay: Date, week: Int, weekday: Int, time: String) -> Date? {
+        let dayOffset = (week - 1) * 7 + (weekday - 1)
+        guard let day = calendar.date(byAdding: .day, value: dayOffset, to: firstDay) else {
+            return nil
+        }
+        return combine(date: day, time: time)
+    }
+
+    static func combine(date: Date, time: String) -> Date? {
+        let parts = time.split(separator: ":")
+        guard parts.count == 2, let hour = Int(parts[0]), let minute = Int(parts[1]) else {
+            return nil
+        }
+
+        var components = calendar.dateComponents([.year, .month, .day], from: date)
+        components.hour = hour
+        components.minute = minute
+        components.second = 0
+        return calendar.date(from: components)
+    }
+}
+
 /// 跨外部展示层共用的课程实例。
 ///
 /// 它是把“周次 + 星期 + 节次”展开后的最终结果：
@@ -22,7 +126,7 @@ struct ScheduleExternalOccurrence: Identifiable, Hashable {
     }
 
     var rangeText: String {
-        "\(Self.timeFormatter.string(from: startDate))-\(Self.timeFormatter.string(from: endDate))"
+        "\(ScheduleSharedDateCodec.formatTime(startDate))-\(ScheduleSharedDateCodec.formatTime(endDate))"
     }
 
     func relativeDayText(referenceDate: Date = Date()) -> String {
@@ -40,31 +144,28 @@ struct ScheduleExternalOccurrence: Identifiable, Hashable {
         case 3:
             return "大后天"
         default:
-            return Self.shortDateFormatter.string(from: startDate)
+            return ScheduleSharedDateCodec.formatShortDate(startDate)
         }
     }
 
-    private static let calendar: Calendar = {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600) ?? .current
-        return calendar
-    }()
+    private static let calendar = ScheduleSharedDateCodec.calendar
+}
 
-    private static let timeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
-        formatter.dateFormat = "HH:mm"
-        return formatter
-    }()
+/// 外部展示层使用的“快照 + 未来课程”解析结果。
+///
+/// watch app、watch widget 等消费方经常会重复做三件事：
+/// 1. 读取共享快照
+/// 2. 推导未来课程
+/// 3. 取出第一节作为“当前 / 下一节”
+///
+/// 这里把这套胶水逻辑收成一个轻量结果，避免各端各写一遍。
+struct ScheduleExternalResolvedSnapshot {
+    let snapshot: ScheduleExternalSnapshot?
+    let upcomingOccurrences: [ScheduleExternalOccurrence]
 
-    private static let shortDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
-        formatter.dateFormat = "M月d日"
-        return formatter
-    }()
+    var nextOccurrence: ScheduleExternalOccurrence? {
+        upcomingOccurrences.first
+    }
 }
 
 /// 共享快照到课程 occurrence 的统一解析器。
@@ -78,7 +179,7 @@ enum ScheduleOccurrenceResolver {
         now: Date = Date(),
         currentCourseDisplayDuration: TimeInterval = defaultCurrentCourseDisplayDuration
     ) -> [ScheduleExternalOccurrence] {
-        guard let firstDay = parseDate(snapshot.firstDayString) else {
+        guard let firstDay = ScheduleSharedDateCodec.parseDate(snapshot.firstDayString) else {
             return []
         }
 
@@ -90,8 +191,8 @@ enum ScheduleOccurrenceResolver {
                     guard
                         let startSlot = slotMap[course.startSection],
                         let endSlot = slotMap[course.endSection],
-                        let startDate = combine(date: firstDay, week: week, weekday: course.weekday, time: startSlot.start),
-                        let endDate = combine(date: firstDay, week: week, weekday: course.weekday, time: endSlot.end),
+                        let startDate = ScheduleSharedDateCodec.combine(firstDay: firstDay, week: week, weekday: course.weekday, time: startSlot.start),
+                        let endDate = ScheduleSharedDateCodec.combine(firstDay: firstDay, week: week, weekday: course.weekday, time: endSlot.end),
                         endDate > now
                     else {
                         return nil
@@ -99,8 +200,8 @@ enum ScheduleOccurrenceResolver {
 
                     return ScheduleExternalOccurrence(
                         id: "\(course.id)-\(week)",
-                        title: normalizeCourseTitle(course.name),
-                        classroom: normalizeClassroom(course.classroom),
+                        title: ScheduleDisplayNormalizer.normalizeCourseTitle(course.name),
+                        classroom: ScheduleDisplayNormalizer.normalizeClassroom(course.classroom),
                         teacher: course.teacher,
                         startDate: startDate,
                         endDate: endDate,
@@ -145,53 +246,52 @@ enum ScheduleOccurrenceResolver {
     }
 
     static func parseDate(_ string: String) -> Date? {
-        guard !string.isEmpty else { return nil }
-        return dateFormatter.date(from: string)
+        ScheduleSharedDateCodec.parseDate(string)
     }
 
-    private static func combine(date firstDay: Date, week: Int, weekday: Int, time: String) -> Date? {
-        let dayOffset = (week - 1) * 7 + (weekday - 1)
-        guard let day = calendar.date(byAdding: .day, value: dayOffset, to: firstDay) else {
-            return nil
+    /// 从一份共享快照解析外部展示层真正关心的最小状态。
+    ///
+    /// `limit` 允许 watch 这类小屏设备只保留前若干节候选，
+    /// 从而在不改变 UI 的前提下减少重复切片与状态分发逻辑。
+    static func resolvedSnapshot(
+        from snapshot: ScheduleExternalSnapshot?,
+        now: Date = Date(),
+        currentCourseDisplayDuration: TimeInterval = defaultCurrentCourseDisplayDuration,
+        limit: Int? = nil
+    ) -> ScheduleExternalResolvedSnapshot {
+        guard let snapshot else {
+            return ScheduleExternalResolvedSnapshot(snapshot: nil, upcomingOccurrences: [])
         }
 
-        let parts = time.split(separator: ":")
-        guard parts.count == 2, let hour = Int(parts[0]), let minute = Int(parts[1]) else {
-            return nil
+        let occurrences = upcomingOccurrences(
+            from: snapshot,
+            now: now,
+            currentCourseDisplayDuration: currentCourseDisplayDuration
+        )
+        let trimmedOccurrences: [ScheduleExternalOccurrence]
+        if let limit, limit >= 0 {
+            trimmedOccurrences = Array(occurrences.prefix(limit))
+        } else {
+            trimmedOccurrences = occurrences
         }
 
-        var components = calendar.dateComponents([.year, .month, .day], from: day)
-        components.hour = hour
-        components.minute = minute
-        components.second = 0
-        return calendar.date(from: components)
+        return ScheduleExternalResolvedSnapshot(
+            snapshot: snapshot,
+            upcomingOccurrences: trimmedOccurrences
+        )
     }
 
-    private static func normalizeClassroom(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "理教楼", with: "理教")
-            .replacingOccurrences(of: "文萃楼", with: "文萃")
+    /// 直接从共享仓库读取并解析。
+    static func loadResolvedSnapshot(
+        now: Date = Date(),
+        currentCourseDisplayDuration: TimeInterval = defaultCurrentCourseDisplayDuration,
+        limit: Int? = nil
+    ) -> ScheduleExternalResolvedSnapshot {
+        resolvedSnapshot(
+            from: ScheduleExternalSnapshotStore.load(),
+            now: now,
+            currentCourseDisplayDuration: currentCourseDisplayDuration,
+            limit: limit
+        )
     }
-
-    private static func normalizeCourseTitle(_ value: String) -> String {
-        if value.hasPrefix("体育/") {
-            return String(value.dropFirst("体育/".count))
-        }
-        return value
-    }
-
-    private static let calendar: Calendar = {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600) ?? .current
-        return calendar
-    }()
-
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
-    }()
 }

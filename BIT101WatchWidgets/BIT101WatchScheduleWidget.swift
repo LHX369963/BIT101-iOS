@@ -1,16 +1,21 @@
 import SwiftUI
 import WidgetKit
 
+/// 手表侧还没有收到任何镜像时的提示文案。
 private let watchScheduleWidgetCampusNetworkMessage = "打开手机 App 同步课表"
+/// 用户尚未在手机侧登录时的提示文案。
 private let watchScheduleWidgetLoginMessage = "请先登录"
+/// 当前与后续都没有课程时的提示文案。
 private let watchScheduleWidgetRestMessage = "今天没课啦"
 
+/// Smart Stack 卡片使用的时间线条目。
 private struct WatchScheduleEntry: TimelineEntry {
     let date: Date
     let nextOccurrence: ScheduleExternalOccurrence?
     let message: String?
 }
 
+/// 负责把共享快照转换成 watch widget 时间线。
 private struct WatchScheduleProvider: TimelineProvider {
     func placeholder(in context: Context) -> WatchScheduleEntry {
         WatchScheduleEntry(
@@ -38,8 +43,13 @@ private struct WatchScheduleProvider: TimelineProvider {
         completion(Timeline(entries: [entry], policy: .after(refreshDate)))
     }
 
+    /// 从本地共享快照生成当前条目。
+    ///
+    /// 这里不主动请求 iPhone；WidgetKit 只消费 watch 本地已落地的数据。
     private func loadEntry() -> WatchScheduleEntry {
-        guard let snapshot = ScheduleExternalSnapshotStore.load() else {
+        let resolved = ScheduleOccurrenceResolver.loadResolvedSnapshot(limit: 1)
+
+        guard let snapshot = resolved.snapshot else {
             return WatchScheduleEntry(date: Date(), nextOccurrence: nil, message: watchScheduleWidgetCampusNetworkMessage)
         }
 
@@ -47,7 +57,7 @@ private struct WatchScheduleProvider: TimelineProvider {
             return WatchScheduleEntry(date: Date(), nextOccurrence: nil, message: watchScheduleWidgetLoginMessage)
         }
 
-        let occurrence = ScheduleOccurrenceResolver.upcomingOccurrences(from: snapshot).first
+        let occurrence = resolved.nextOccurrence
         return WatchScheduleEntry(
             date: Date(),
             nextOccurrence: occurrence,
@@ -55,6 +65,10 @@ private struct WatchScheduleProvider: TimelineProvider {
         )
     }
 
+    /// 计算下一次时间线刷新时机。
+    ///
+    /// 优先卡在“上课开始”或“本节展示截止”这两个边界点附近，
+    /// 这样卡片能在课程状态切换时尽快刷新。
     private func nextRefreshDate(for entry: WatchScheduleEntry) -> Date {
         let now = Date()
         let candidates = [entry.nextOccurrence?.startDate, entry.nextOccurrence?.displayUntilDate]
@@ -70,6 +84,7 @@ private struct WatchScheduleProvider: TimelineProvider {
     }
 }
 
+/// 提供给 Smart Stack 的课表卡片。
 struct BIT101WatchScheduleWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: "BIT101WatchScheduleWidget", provider: WatchScheduleProvider()) { entry in
@@ -82,6 +97,7 @@ struct BIT101WatchScheduleWidget: Widget {
     }
 }
 
+/// Smart Stack 卡片的具体渲染视图。
 private struct WatchScheduleEntryView: View {
     let entry: WatchScheduleEntry
 

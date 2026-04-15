@@ -24,7 +24,7 @@
 ## 每份文档的定位
 
 - `ARCHITECTURE.md`
-  讲系统边界、主 App / widget / Live Activity 的协作关系。
+  讲系统边界、主 App / widget / Apple Watch / Live Activity 的协作关系。
 - `CODEBASE_GUIDE.md`
   讲当前代码库里各模块的职责、数据流和维护约束。
 - `STATE_AND_STORAGE.md`
@@ -54,5 +54,7 @@
   优先看 `STATE_AND_STORAGE.md` 和 `MAINTENANCE_GUIDE.md`
 - 想排查构建、签名、扩展问题
   优先看 `MAINTENANCE_GUIDE.md`
+- 想改 Apple Watch 课表、Smart Stack 或跨 target 共享快照
+  优先看 `ARCHITECTURE.md`、`CODEBASE_GUIDE.md` 和 `FILE_INDEX.md`
 - 想继续清理大文件或桥接实现
   优先看 `CODE_QUALITY_AUDIT.md`

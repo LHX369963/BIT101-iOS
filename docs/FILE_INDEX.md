@@ -16,6 +16,12 @@
   根容器，根据登录状态切换登录页或登录后壳层。
 - `BIT101-iOS/BIT101-iOS/CachedRemoteImage.swift`
   远程图片缓存组件，负责头像等高频图片的内存与磁盘缓存。
+- `BIT101-iOS/BIT101-iOS/Shared/ScheduleSharedOccurrence.swift`
+  跨主 App / widget / watch 共用的课表 occurrence 解析与展示规范化逻辑。
+- `BIT101-iOS/BIT101-iOS/Shared/ScheduleSharedSnapshot.swift`
+  共享快照模型、共享容器路径和读写入口。
+- `BIT101-iOS/BIT101-iOS/WatchSync/WatchScheduleSyncManager.swift`
+  iPhone 与 Apple Watch 之间的课表镜像同步桥。
 
 ## 2. Shell
 
@@ -104,7 +110,18 @@
 - `BIT101-iOS/BIT101ScheduleWidget/BIT101ScheduleWidgetBundle.swift`
   widget bundle 入口，用来向系统注册当前扩展提供的组件。
 
-## 11. 建议阅读顺序
+## 11. Apple Watch
+
+- `BIT101-iOS/BIT101WatchExtension/BIT101WatchExtensionApp.swift`
+  watch extension 入口，负责挂载 watch 主页面状态模型。
+- `BIT101-iOS/BIT101WatchExtension/WatchScheduleRootView.swift`
+  Apple Watch 主页面与本地镜像消费逻辑。
+- `BIT101-iOS/BIT101WatchWidgets/BIT101WatchScheduleWidget.swift`
+  Apple Watch Smart Stack 课表组件。
+- `BIT101-iOS/BIT101WatchWidgets/BIT101WatchWidgetsBundle.swift`
+  watch widgets bundle 入口，用来向系统注册 Smart Stack 组件。
+
+## 12. 建议阅读顺序
 
 如果你准备修改某个模块，推荐先按这个顺序看：
 

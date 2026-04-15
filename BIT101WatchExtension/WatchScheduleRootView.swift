@@ -1,13 +1,21 @@
 import SwiftUI
 
+/// watch 主页面使用的状态模型。
+///
+/// 它只关心三件事：
+/// - 从共享快照仓库读取当前镜像
+/// - 计算下一节课与后续课节
+/// - 在需要时向 iPhone 发起一次显式刷新
 @MainActor
 final class WatchScheduleStatusModel: ObservableObject {
+    /// 主页面最多展示的后续课节数量，避免长列表在手表上无限拉长。
     private static let maxVisibleOccurrences = 50
 
     @Published private(set) var snapshot: ScheduleExternalSnapshot?
     @Published private(set) var nextOccurrence: ScheduleExternalOccurrence?
     @Published private(set) var upcomingOccurrences: [ScheduleExternalOccurrence] = []
 
+    /// 激活同步链路，并尝试立刻拿到最新课表。
     func activate() {
         WatchScheduleSyncManager.shared.activateIfNeeded()
         #if os(watchOS)
@@ -16,16 +24,17 @@ final class WatchScheduleStatusModel: ObservableObject {
         reload()
     }
 
+    /// 仅从本地镜像重载当前页面。
+    ///
+    /// 这个方法不会主动访问网络；它只消费 iPhone 已经推送过来的共享快照。
     func reload() {
-        let snapshot = ScheduleExternalSnapshotStore.load()
-        self.snapshot = snapshot
-        let occurrences = snapshot
-            .map { ScheduleOccurrenceResolver.upcomingOccurrences(from: $0) }
-            ?? []
-        self.nextOccurrence = occurrences.first
-        self.upcomingOccurrences = Array(occurrences.prefix(Self.maxVisibleOccurrences))
+        let resolved = ScheduleOccurrenceResolver.loadResolvedSnapshot(limit: Self.maxVisibleOccurrences)
+        self.snapshot = resolved.snapshot
+        self.nextOccurrence = resolved.nextOccurrence
+        self.upcomingOccurrences = resolved.upcomingOccurrences
     }
 
+    /// 显式请求手机端重新推送一次最新课表。
     func requestRefresh() {
         #if os(watchOS)
         WatchScheduleSyncManager.shared.requestLatestSnapshotFromPhone()
@@ -34,6 +43,10 @@ final class WatchScheduleStatusModel: ObservableObject {
     }
 }
 
+/// watch 主页面。
+///
+/// 展示顺序保持极简：先给出“当前/下一节”的摘要，再向下列出后续课节，
+/// 让用户抬腕后能先看到最关键的信息，继续滚动时再看完整一些的安排。
 struct WatchScheduleRootView: View {
     @ObservedObject var model: WatchScheduleStatusModel
 

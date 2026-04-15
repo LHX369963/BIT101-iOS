@@ -102,12 +102,12 @@ enum AppTab: String, Identifiable, Codable {
 ///
 /// 壳层只关心两件事：按照设置中心决定展示哪些 tab，以及把退出登录回调继续往下传。
 struct AppShellView: View {
-    private static let startupNoticeTitle = "1.5.0版本更新"
+    private static let startupNoticeTitle = "0.0.1 版本更新"
     private static let startupNoticeBody = """
-    1、新增 Apple Watch 版
-    2、支持在手表上查看当前课程、下一节课和后续课表
-    3、支持 Smart Stack 小组件，抬腕即可快速查看课表
-    4、优化同步与稳定性
+    1、课表课程详情支持“调这节课 / 调这门课”
+    2、现在可以只调整当前周这一节课，不会误伤整门课
+    3、收口 Apple Watch / Smart Stack 的课表解析逻辑，减少重复实现
+    4、优化手表与手机之间的课表同步代码路径，提升稳定性
     5、修复若干已知问题
     """
     private static let widgetUsageGuideTitle = "非常有用的几个用法"

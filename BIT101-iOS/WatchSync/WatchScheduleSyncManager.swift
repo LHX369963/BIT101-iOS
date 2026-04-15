@@ -16,19 +16,32 @@ import WidgetKit
 final class WatchScheduleSyncManager: NSObject, WCSessionDelegate {
     static let shared = WatchScheduleSyncManager()
 
+    /// `WatchConnectivity` 消息里使用的字段名约定。
+    ///
+    /// 这里统一收口是为了避免 iPhone / watch 两端手写字符串常量时发生漂移。
     private enum PayloadKey {
         nonisolated static let snapshotData = "schedule_external_snapshot_data"
         nonisolated static let requestLatestSnapshot = "request_latest_schedule_snapshot"
     }
 
+    /// watch 端前台即时拉取最新快照时发送的原始请求体。
+    ///
+    /// 这里故意使用 `Data` 而不是字典，是因为 `sendMessageData` 的负载更轻，
+    /// 且请求只需要表达一种语义："请把最新快照发给我"。
     nonisolated private static let requestData = Data("request_latest_schedule_snapshot".utf8)
 
+    /// 与共享快照仓库保持一致的编码器。
+    ///
+    /// delegate 回调里会在非隔离上下文中引用它，因此显式标记为 `nonisolated`。
     nonisolated private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         return encoder
     }()
 
+    /// 与共享快照仓库保持一致的解码器。
+    ///
+    /// 统一使用 ISO8601，避免 iPhone 写入和 watch 读取的日期策略不一致。
     nonisolated private static let decoder: JSONDecoder = {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -52,6 +65,33 @@ final class WatchScheduleSyncManager: NSObject, WCSessionDelegate {
     }
 
     #if os(iOS)
+    /// 编码一份快照，供 iPhone -> watch 同步链路复用。
+    private func encodedSnapshotData(_ snapshot: ScheduleExternalSnapshot) -> Data? {
+        try? Self.encoder.encode(snapshot)
+    }
+
+    /// 从共享仓库读取并编码当前最新快照。
+    private func currentSnapshotDataIfAvailable() -> Data? {
+        guard let snapshot = ScheduleExternalSnapshotStore.load() else { return nil }
+        return encodedSnapshotData(snapshot)
+    }
+
+    /// 统一把快照镜像写进 `applicationContext`。
+    ///
+    /// 这样主动推送、前台即时回复、被动重试三条链路都走同一份逻辑。
+    private func updateApplicationContext(
+        withSnapshotData data: Data,
+        session: WCSession
+    ) {
+        do {
+            try session.updateApplicationContext([
+                PayloadKey.snapshotData: data,
+            ])
+        } catch {}
+    }
+    #endif
+
+    #if os(iOS)
     /// 把一份最新课表快照推送给已配对的 watch。
     func push(snapshot: ScheduleExternalSnapshot) {
         activateIfNeeded()
@@ -59,18 +99,15 @@ final class WatchScheduleSyncManager: NSObject, WCSessionDelegate {
         let session = WCSession.default
         guard session.isPaired else { return }
 
-        guard let data = try? Self.encoder.encode(snapshot) else { return }
-        do {
-            try session.updateApplicationContext([
-                PayloadKey.snapshotData: data,
-            ])
-        } catch {}
+        guard let data = encodedSnapshotData(snapshot) else { return }
+        updateApplicationContext(withSnapshotData: data, session: session)
     }
 
     /// 从当前共享快照重新推送一次。
     func pushCurrentSnapshotIfAvailable() {
-        guard let snapshot = ScheduleExternalSnapshotStore.load() else { return }
-        push(snapshot: snapshot)
+        let session = WCSession.default
+        guard session.isPaired, let data = currentSnapshotDataIfAvailable() else { return }
+        updateApplicationContext(withSnapshotData: data, session: session)
     }
     #endif
 
@@ -105,6 +142,10 @@ final class WatchScheduleSyncManager: NSObject, WCSessionDelegate {
     }
     #endif
 
+    /// `WCSession` 激活完成后的入口。
+    ///
+    /// watch 端这里会主动补发一次拉取请求，确保用户第一次打开手表 App 时，
+    /// 即使此前没有主动点“重新同步”，也能尽快收到手机侧的最新课表。
     nonisolated func session(
         _ session: WCSession,
         activationDidCompleteWith activationState: WCSessionActivationState,
@@ -131,6 +172,11 @@ final class WatchScheduleSyncManager: NSObject, WCSessionDelegate {
     }
     #endif
 
+    /// 处理 `sendMessageData` 的前台即时请求。
+    ///
+    /// 当前只在 watch -> iPhone “拉最新课表”这条链路上使用。
+    /// 由于这是 nonisolated 的 delegate 回调，所以真正读取共享快照的动作
+    /// 会再切回 `MainActor`，避免并发隔离 warning。
     nonisolated func session(
         _ session: WCSession,
         didReceiveMessageData messageData: Data,
@@ -139,12 +185,8 @@ final class WatchScheduleSyncManager: NSObject, WCSessionDelegate {
         #if os(iOS)
         if messageData == Self.requestData {
             Task { @MainActor in
-                if let snapshot = ScheduleExternalSnapshotStore.load(), let data = try? Self.encoder.encode(snapshot) {
-                    do {
-                        try session.updateApplicationContext([
-                            PayloadKey.snapshotData: data,
-                        ])
-                    } catch {}
+                if let data = self.currentSnapshotDataIfAvailable() {
+                    self.updateApplicationContext(withSnapshotData: data, session: session)
                     replyHandler(data)
                     return
                 }
@@ -158,6 +200,10 @@ final class WatchScheduleSyncManager: NSObject, WCSessionDelegate {
         replyHandler(Data())
     }
 
+    /// 处理字典形式的请求 / 回复。
+    ///
+    /// 这里主要保留给 `requestLatestSnapshot` 这种语义化字段，和
+    /// `applicationContext` 的键保持一致，便于两条同步链复用同一套协议。
     nonisolated func session(
         _ session: WCSession,
         didReceiveMessage message: [String: Any],
@@ -167,12 +213,8 @@ final class WatchScheduleSyncManager: NSObject, WCSessionDelegate {
         if let shouldPush = message[PayloadKey.requestLatestSnapshot] as? Bool, shouldPush {
             Task { @MainActor in
                 let payload: [String: Any]
-                if let snapshot = ScheduleExternalSnapshotStore.load(), let data = try? Self.encoder.encode(snapshot) {
-                    do {
-                        try session.updateApplicationContext([
-                            PayloadKey.snapshotData: data,
-                        ])
-                    } catch {}
+                if let data = self.currentSnapshotDataIfAvailable() {
+                    self.updateApplicationContext(withSnapshotData: data, session: session)
                     payload = [PayloadKey.snapshotData: data]
                 } else {
                     payload = [:]
@@ -186,6 +228,10 @@ final class WatchScheduleSyncManager: NSObject, WCSessionDelegate {
         replyHandler([:])
     }
 
+    /// 处理 `applicationContext` 的 best-effort 同步。
+    ///
+    /// 这条链路不保证每次都送达，但适合承载“最新状态镜像”；
+    /// 因此主端在缓存更新时会不断覆盖它，watch 只需读取最后一份即可。
     nonisolated func session(
         _ session: WCSession,
         didReceiveApplicationContext applicationContext: [String: Any]
@@ -205,6 +251,10 @@ final class WatchScheduleSyncManager: NSObject, WCSessionDelegate {
         }
     }
 
+    /// 尝试把收到的快照数据落到本地共享仓库。
+    ///
+    /// 一旦成功保存，就立即触发 `WidgetCenter` 刷新，保证 Smart Stack
+    /// 和手表 App 首页能尽快看到最新结果。
     @MainActor
     private func persistSnapshotDataIfPossible(_ data: Data) {
         guard let snapshot = try? Self.decoder.decode(ScheduleExternalSnapshot.self, from: data) else { return }
