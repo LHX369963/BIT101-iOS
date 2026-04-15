@@ -337,7 +337,7 @@
 				B7329DD3099B96EF917410BF /* Sources */,
 				BACEBF54A4CDA758F5BAEA2A /* Frameworks */,
 				82FB2ADDF29ACDEDF3F87CD3 /* Resources */,
-				FC107DF24576CD610F4804F3 /* Embed App Extensions */,
+				FC107DF24576CD610F4804F3 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
@@ -357,7 +357,7 @@
 				D2FF4C922F729DB4000FA1C1 /* Sources */,
 				D2FF4C932F729DB4000FA1C1 /* Frameworks */,
 				D2FF4C942F729DB4000FA1C1 /* Resources */,
-				524910F6664E97D0AD2254A6 /* Embed App Extensions */,
+				524910F6664E97D0AD2254A6 /* Embed Foundation Extensions */,
 				7DE3E2E83612E965A2BA07B0 /* Embed Watch Content */,
 			);
 			buildRules = (
@@ -560,7 +560,7 @@
 				DEVELOPMENT_TEAM = Y2T72736G3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = BIT101Watch/Info.plist;
-				MARKETING_VERSION = 0.0.1;
+				MARKETING_VERSION = 1.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "BIT101-dev.BIT101-iOS.watchkitapp";
 				PRODUCT_NAME = BIT101Watch;
 				SDKROOT = watchos;
@@ -580,7 +580,7 @@
 				DEVELOPMENT_TEAM = Y2T72736G3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = BIT101WatchExtension/Info.plist;
-				MARKETING_VERSION = 0.0.1;
+				MARKETING_VERSION = 1.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "BIT101-dev.BIT101-iOS.watchkitapp.watchkitextension";
 				PRODUCT_NAME = BIT101WatchExtension;
 				SDKROOT = watchos;
@@ -609,7 +609,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.0.1;
+				MARKETING_VERSION = 1.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "BIT101-dev.BIT101-iOS.ScheduleWidget";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -636,7 +636,7 @@
 				DEVELOPMENT_TEAM = Y2T72736G3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = BIT101WatchExtension/Info.plist;
-				MARKETING_VERSION = 0.0.1;
+				MARKETING_VERSION = 1.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "BIT101-dev.BIT101-iOS.watchkitapp.watchkitextension";
 				PRODUCT_NAME = BIT101WatchExtension;
 				SDKROOT = watchos;
@@ -664,7 +664,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.0.1;
+				MARKETING_VERSION = 1.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "BIT101-dev.BIT101-iOS.ScheduleWidget";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -692,7 +692,7 @@
 				DEVELOPMENT_TEAM = Y2T72736G3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = BIT101WatchWidgets/Info.plist;
-				MARKETING_VERSION = 0.0.1;
+				MARKETING_VERSION = 1.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "BIT101-dev.BIT101-iOS.watchkitapp.widgets";
 				PRODUCT_NAME = BIT101WatchWidgets;
 				SDKROOT = watchos;
@@ -841,7 +841,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.0.1;
+				MARKETING_VERSION = 1.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "BIT101-dev.BIT101-iOS";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -875,7 +875,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.0.1;
+				MARKETING_VERSION = 1.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "BIT101-dev.BIT101-iOS";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -902,7 +902,7 @@
 				DEVELOPMENT_TEAM = Y2T72736G3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = BIT101WatchWidgets/Info.plist;
-				MARKETING_VERSION = 0.0.1;
+				MARKETING_VERSION = 1.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "BIT101-dev.BIT101-iOS.watchkitapp.widgets";
 				PRODUCT_NAME = BIT101WatchWidgets;
 				SDKROOT = watchos;
@@ -923,7 +923,7 @@
 				DEVELOPMENT_TEAM = Y2T72736G3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = BIT101Watch/Info.plist;
-				MARKETING_VERSION = 0.0.1;
+				MARKETING_VERSION = 1.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "BIT101-dev.BIT101-iOS.watchkitapp";
 				PRODUCT_NAME = BIT101Watch;
 				SDKROOT = watchos;

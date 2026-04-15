@@ -102,7 +102,7 @@ enum AppTab: String, Identifiable, Codable {
 ///
 /// 壳层只关心两件事：按照设置中心决定展示哪些 tab，以及把退出登录回调继续往下传。
 struct AppShellView: View {
-    private static let startupNoticeTitle = "0.0.1 版本更新"
+    private static let startupNoticeTitle = "1.5.1 版本更新"
     private static let startupNoticeBody = """
     1、课表课程详情支持“调这节课 / 调这门课”
     2、现在可以只调整当前周这一节课，不会误伤整门课
