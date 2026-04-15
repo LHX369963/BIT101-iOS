@@ -570,32 +570,40 @@ final class ScheduleViewModel: ObservableObject {
         )
     }
 
+    /// 把已有课程转成编辑草稿。
+    ///
+    /// - Parameter editsOccurrenceOnly: 为 `true` 时，草稿周次固定成当前这一周，
+    ///   用于“调这节课”把一门重复课拆成一次性调整后的单次课程。
+    func courseDraft(for record: CourseRecord, week: Int, editsOccurrenceOnly: Bool) -> CourseDraft {
+        CourseDraft(
+            title: record.name,
+            teacher: record.teacher,
+            classroom: record.classroom,
+            weekday: record.weekday,
+            startSection: record.startSection,
+            endSection: record.endSection,
+            weeksText: editsOccurrenceOnly ? "\(week)" : formattedWeeksText(record.weeks)
+        )
+    }
+
     /// 新增一条本地课程。
     ///
     /// 这里不会回写学校接口，而是只修改本地缓存，用于补录临时课程或手动修正。
     func addCourse(_ draft: CourseDraft) throws {
-        let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty else {
-            throw scheduleValidationError("课程名称不能为空。")
-        }
-
-        let weeks = try parseWeeksText(draft.weeksText)
-        guard draft.startSection > 0, draft.endSection >= draft.startSection else {
-            throw scheduleValidationError("节次范围不合法。")
-        }
+        let resolved = try resolveCourseDraft(draft)
 
         cache.courses.append(
             CourseRecord(
                 id: UUID().uuidString,
                 term: cache.currentTerm,
-                name: title,
-                teacher: draft.teacher.trimmingCharacters(in: .whitespacesAndNewlines),
-                classroom: draft.classroom.trimmingCharacters(in: .whitespacesAndNewlines),
+                name: resolved.title,
+                teacher: resolved.teacher,
+                classroom: resolved.classroom,
                 description: "",
-                weeks: weeks,
-                weekday: draft.weekday,
-                startSection: draft.startSection,
-                endSection: draft.endSection,
+                weeks: resolved.weeks,
+                weekday: resolved.weekday,
+                startSection: resolved.startSection,
+                endSection: resolved.endSection,
                 campus: "",
                 number: "",
                 credit: 0,
@@ -605,6 +613,91 @@ final class ScheduleViewModel: ObservableObject {
                 department: ""
             )
         )
+        persist()
+    }
+
+    /// 更新整门课程。
+    func updateCourse(id: String, draft: CourseDraft) throws {
+        guard let index = cache.courses.firstIndex(where: { $0.id == id }) else { return }
+        let resolved = try resolveCourseDraft(draft)
+        let original = cache.courses[index]
+
+        cache.courses[index] = CourseRecord(
+            id: original.id,
+            term: original.term,
+            name: resolved.title,
+            teacher: resolved.teacher,
+            classroom: resolved.classroom,
+            description: original.description,
+            weeks: resolved.weeks,
+            weekday: resolved.weekday,
+            startSection: resolved.startSection,
+            endSection: resolved.endSection,
+            campus: original.campus,
+            number: original.number,
+            credit: original.credit,
+            hour: original.hour,
+            type: original.type,
+            category: original.category,
+            department: original.department
+        )
+        persist()
+    }
+
+    /// 只调整当前周这一节课。
+    ///
+    /// 实现方式是把原课程里的当前周拆出去，生成一条只覆盖这一周的新课程记录；
+    /// 其它周仍保留原来的排课信息。
+    func updateCourseOccurrence(id: String, week: Int, draft: CourseDraft) throws {
+        guard let index = cache.courses.firstIndex(where: { $0.id == id }) else { return }
+        let original = cache.courses[index]
+        let resolved = try resolveCourseDraft(draft, fixedWeeks: [week])
+        let adjustedCourse = CourseRecord(
+            id: original.weeks == [week] ? original.id : UUID().uuidString,
+            term: original.term,
+            name: resolved.title,
+            teacher: resolved.teacher,
+            classroom: resolved.classroom,
+            description: original.description,
+            weeks: [week],
+            weekday: resolved.weekday,
+            startSection: resolved.startSection,
+            endSection: resolved.endSection,
+            campus: original.campus,
+            number: original.number,
+            credit: original.credit,
+            hour: original.hour,
+            type: original.type,
+            category: original.category,
+            department: original.department
+        )
+
+        if original.weeks == [week] {
+            cache.courses[index] = adjustedCourse
+        } else {
+            let remainingWeeks = original.weeks.filter { $0 != week }
+            cache.courses[index] = CourseRecord(
+                id: original.id,
+                term: original.term,
+                name: original.name,
+                teacher: original.teacher,
+                classroom: original.classroom,
+                description: original.description,
+                weeks: remainingWeeks,
+                weekday: original.weekday,
+                startSection: original.startSection,
+                endSection: original.endSection,
+                campus: original.campus,
+                number: original.number,
+                credit: original.credit,
+                hour: original.hour,
+                type: original.type,
+                category: original.category,
+                department: original.department
+            )
+            cache.courses.append(adjustedCourse)
+        }
+
         persist()
     }
 
@@ -961,6 +1054,63 @@ final class ScheduleViewModel: ObservableObject {
         }
 
         return weeks.sorted()
+    }
+
+    /// 把有序周次数组压成适合表单展示的文本，例如 `1-4,6,8-10`。
+    private func formattedWeeksText(_ weeks: [Int]) -> String {
+        guard !weeks.isEmpty else { return "" }
+
+        var ranges: [String] = []
+        var lower = weeks[0]
+        var upper = weeks[0]
+
+        for week in weeks.dropFirst() {
+            if week == upper + 1 {
+                upper = week
+            } else {
+                ranges.append(lower == upper ? "\(lower)" : "\(lower)-\(upper)")
+                lower = week
+                upper = week
+            }
+        }
+        ranges.append(lower == upper ? "\(lower)" : "\(lower)-\(upper)")
+        return ranges.joined(separator: ",")
+    }
+
+    /// 对课程表单做统一校验并返回裁剪后的值。
+    private func resolveCourseDraft(_ draft: CourseDraft, fixedWeeks: [Int]? = nil) throws -> (
+        title: String,
+        teacher: String,
+        classroom: String,
+        weeks: [Int],
+        weekday: Int,
+        startSection: Int,
+        endSection: Int
+    ) {
+        let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else {
+            throw scheduleValidationError("课程名称不能为空。")
+        }
+
+        let weekday = draft.weekday
+        guard (1 ... 7).contains(weekday) else {
+            throw scheduleValidationError("星期设置不合法。")
+        }
+
+        guard draft.startSection > 0, draft.endSection >= draft.startSection else {
+            throw scheduleValidationError("节次范围不合法。")
+        }
+
+        let weeks = try fixedWeeks ?? parseWeeksText(draft.weeksText)
+        return (
+            title: title,
+            teacher: draft.teacher.trimmingCharacters(in: .whitespacesAndNewlines),
+            classroom: draft.classroom.trimmingCharacters(in: .whitespacesAndNewlines),
+            weeks: weeks,
+            weekday: weekday,
+            startSection: draft.startSection,
+            endSection: draft.endSection
+        )
     }
 
     /// 把原始教室占用记录格式化成可直接展示的空教室列表。

@@ -26,19 +26,14 @@ private func makeHorizontalSectionSwitchGesture(onStep: @escaping (Int) -> Void)
 
 /// 统一压缩教室名称里的冗长楼名，提升课表卡片可读性。
 private func normalizeDisplayedClassroom(_ value: String) -> String {
-    value
-        .replacingOccurrences(of: "理教楼", with: "理教")
-        .replacingOccurrences(of: "文萃楼", with: "文萃")
+    ScheduleDisplayNormalizer.normalizeClassroom(value)
 }
 
 /// 对课程标题做本地展示优化。
 ///
 /// 目前主要把 `体育/xx` 压缩成 `xx`。
 private func normalizeDisplayedCourseTitle(_ value: String) -> String {
-    if value.hasPrefix("体育/") {
-        return String(value.dropFirst("体育/".count))
-    }
-    return value
+    ScheduleDisplayNormalizer.normalizeCourseTitle(value)
 }
 
 /// 日程页根视图。
@@ -176,10 +171,12 @@ private struct CourseScheduleTabView: View {
     let resetSignal: Int
     @State private var selectedEntry: ScheduleCalendarEntry?
     @State private var editingCustomScheduleID: String?
+    @State private var editingCourseID: String?
     @State private var customScheduleDraft = CustomScheduleDraft()
     @State private var courseDraft = CourseDraft()
     @State private var isShowingEditSchedule = false
-    @State private var isShowingAddCourse = false
+    @State private var isShowingCourseEditor = false
+    @State private var courseEditorMode: CourseEditorMode = .add
     @State private var settingsRoute: SettingsRoute?
 
     private var activeSchedule: ScheduleViewModel.CourseScheduleVariant {
@@ -236,8 +233,9 @@ private struct CourseScheduleTabView: View {
                                     }
 
                                     Button("添加课程") {
+                                        courseEditorMode = .add
                                         courseDraft = viewModel.courseDraft(for: viewModel.selectedWeek)
-                                        isShowingAddCourse = true
+                                        isShowingCourseEditor = true
                                     }
                                 } label: {
                                     CourseScheduleFABLabel(systemImage: "plus")
@@ -287,6 +285,22 @@ private struct CourseScheduleTabView: View {
                 timeTable: activeSchedule.timeTable,
                 allowsCourseMutation: supportsEditingDisplayedSchedule,
                 allowsCustomScheduleMutation: supportsEditingDisplayedSchedule,
+                onEditCourseOccurrence: {
+                    guard let course = viewModel.cache.courses.first(where: { $0.id == entry.sourceID }) else { return }
+                    editingCourseID = course.id
+                    courseEditorMode = .editOccurrence(week: viewModel.selectedWeek)
+                    courseDraft = viewModel.courseDraft(for: course, week: viewModel.selectedWeek, editsOccurrenceOnly: true)
+                    selectedEntry = nil
+                    isShowingCourseEditor = true
+                },
+                onEditCourse: {
+                    guard let course = viewModel.cache.courses.first(where: { $0.id == entry.sourceID }) else { return }
+                    editingCourseID = course.id
+                    courseEditorMode = .editCourse(courseID: course.id)
+                    courseDraft = viewModel.courseDraft(for: course, week: viewModel.selectedWeek, editsOccurrenceOnly: false)
+                    selectedEntry = nil
+                    isShowingCourseEditor = true
+                },
                 onDeleteCourseOccurrence: {
                     viewModel.deleteCourseOccurrence(id: entry.sourceID, week: viewModel.selectedWeek)
                     selectedEntry = nil
@@ -329,20 +343,38 @@ private struct CourseScheduleTabView: View {
                 }
             )
         }
-        .sheet(isPresented: $isShowingAddCourse) {
+        .sheet(isPresented: $isShowingCourseEditor) {
             AddCourseSheet(
                 draft: $courseDraft,
+                mode: courseEditorMode,
                 timeTable: viewModel.cache.timeTable,
                 onSubmit: {
                     do {
-                        try viewModel.addCourse(courseDraft)
-                        isShowingAddCourse = false
+                        switch courseEditorMode {
+                        case .add:
+                            try viewModel.addCourse(courseDraft)
+                        case let .editOccurrence(week):
+                            if let sourceID = editingCourseID {
+                                try viewModel.updateCourseOccurrence(id: sourceID, week: week, draft: courseDraft)
+                            } else {
+                                throw NSError(
+                                    domain: "BIT101.Schedule",
+                                    code: -1,
+                                    userInfo: [NSLocalizedDescriptionKey: "找不到要调整的课程。"]
+                                )
+                            }
+                        case let .editCourse(courseID):
+                            try viewModel.updateCourse(id: courseID, draft: courseDraft)
+                        }
+                        editingCourseID = nil
+                        isShowingCourseEditor = false
                     } catch {
                         viewModel.notice = ScheduleNotice(title: "保存失败", message: error.localizedDescription)
                     }
                 },
                 onDismiss: {
-                    isShowingAddCourse = false
+                    editingCourseID = nil
+                    isShowingCourseEditor = false
                 }
             )
         }
@@ -364,8 +396,9 @@ private struct CourseScheduleTabView: View {
         selectedEntry = nil
         settingsRoute = nil
         isShowingEditSchedule = false
-        isShowingAddCourse = false
+        isShowingCourseEditor = false
         editingCustomScheduleID = nil
+        editingCourseID = nil
     }
 
     /// 课表之间的上下滑循环切换。
@@ -489,6 +522,48 @@ private struct CourseScheduleTabView: View {
         }
 
         return normalize(entries: courseEntries + examEntries + customEntries)
+    }
+}
+
+private enum CourseEditorMode: Equatable {
+    case add
+    case editOccurrence(week: Int)
+    case editCourse(courseID: String)
+
+    var title: String {
+        switch self {
+        case .add:
+            return "添加课程"
+        case .editOccurrence:
+            return "调这节课"
+        case .editCourse:
+            return "调这门课"
+        }
+    }
+
+    var locksWeeks: Bool {
+        if case .editOccurrence = self {
+            return true
+        }
+        return false
+    }
+
+    var fixedWeek: Int? {
+        if case let .editOccurrence(week) = self {
+            return week
+        }
+        return nil
+    }
+
+    var footerText: String {
+        switch self {
+        case .add:
+            return "添加的课程会存储在本地；删除应用后信息将丢失。"
+        case let .editOccurrence(week):
+            return "这次只会修改第\(week)周这一节课，系统会把它从原课程里拆出来单独保存。"
+        case .editCourse:
+            return "这会修改这门课在所选周次内的统一排课信息。"
+        }
     }
 }
 
@@ -795,6 +870,8 @@ private struct ScheduleEntryDetailSheet: View {
     let timeTable: [TimeSlot]
     let allowsCourseMutation: Bool
     let allowsCustomScheduleMutation: Bool
+    let onEditCourseOccurrence: () -> Void
+    let onEditCourse: () -> Void
     let onDeleteCourseOccurrence: () -> Void
     let onDeleteCourse: () -> Void
     let onEditCustomSchedule: () -> Void
@@ -823,6 +900,17 @@ private struct ScheduleEntryDetailSheet: View {
                 }
 
                 if entry.kind == .course, allowsCourseMutation {
+                    Section {
+                        Button("调这节课") {
+                            dismiss()
+                            onEditCourseOccurrence()
+                        }
+                        Button("调这门课") {
+                            dismiss()
+                            onEditCourse()
+                        }
+                    }
+
                     Section {
                         Button("删除这节课", role: .destructive) {
                             pendingCourseDeletion = .occurrence
@@ -905,6 +993,7 @@ private struct ScheduleEntryDetailSheet: View {
 /// 这是纯本地课程的补录入口，主要用于补一周里的临时课或手动修正课表。
 private struct AddCourseSheet: View {
     @Binding var draft: CourseDraft
+    let mode: CourseEditorMode
     let timeTable: [TimeSlot]
     let onSubmit: () -> Void
     let onDismiss: () -> Void
@@ -918,7 +1007,14 @@ private struct AddCourseSheet: View {
                     TextField("课程名称", text: $draft.title)
                     TextField("教师", text: $draft.teacher)
                     TextField("教室", text: $draft.classroom)
-                    TextField("周次（如 1-16,18）", text: $draft.weeksText)
+                    if mode.locksWeeks, let fixedWeek = mode.fixedWeek {
+                        LabeledContent("周次") {
+                            Text("第\(fixedWeek)周")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        TextField("周次（如 1-16,18）", text: $draft.weeksText)
+                    }
                 }
 
                 Section("时间") {
@@ -942,12 +1038,12 @@ private struct AddCourseSheet: View {
                 }
 
                 Section {
-                    Text("添加的课程会存储在本地；删除应用后信息将丢失。")
+                    Text(mode.footerText)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
             }
-            .navigationTitle("添加课程")
+            .navigationTitle(mode.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
