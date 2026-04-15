@@ -448,25 +448,7 @@ struct SharedScheduleRecord: Codable, Identifiable, Hashable {
 /// 日程模块内部有多种日期展示形式，因此集中维护一组格式器，避免各页面各自创建。
 enum ScheduleDateCodec {
     /// 固定使用公历，避免系统日历设置影响周数计算。
-    static let calendar = Calendar(identifier: .gregorian)
-
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
-    }()
-
-    private static let shortDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
-        formatter.dateFormat = "M月d日"
-        return formatter
-    }()
+    static let calendar = ScheduleSharedDateCodec.calendar
 
     private static let dateTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -496,8 +478,7 @@ enum ScheduleDateCodec {
     }()
 
     static func parseDate(_ string: String) -> Date? {
-        guard !string.isEmpty else { return nil }
-        return dateFormatter.date(from: string)
+        ScheduleSharedDateCodec.parseDate(string)
     }
 
     /// 解析 `HH:mm` 文本为一个只关心时分的 `Date`。
@@ -512,12 +493,12 @@ enum ScheduleDateCodec {
 
     /// 格式化 `yyyy-MM-dd` 文本。
     static func formatDate(_ date: Date) -> String {
-        dateFormatter.string(from: date)
+        ScheduleSharedDateCodec.formatDate(date)
     }
 
     /// 格式化 `M月d日` 短日期。
     static func formatShortDate(_ date: Date) -> String {
-        shortDateFormatter.string(from: date)
+        ScheduleSharedDateCodec.formatShortDate(date)
     }
 
     /// 格式化精确到分钟的完整日期时间。

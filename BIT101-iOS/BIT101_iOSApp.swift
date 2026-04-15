@@ -16,6 +16,9 @@ import UIKit
 /// - 不打断前台，不弹成功/失败提示
 /// - 仅对“已经启用过乐学 DDL”的账号生效，避免从未使用过 DDL 的用户被动发起请求
 enum DDLSilentRefreshCoordinator {
+    /// 记录“某个账号今天已经尝试过静默同步”的 key 前缀。
+    ///
+    /// 这里显式标记成 `nonisolated`，是因为后台任务闭包会在非主线程里拼 key。
     nonisolated private static let lastAttemptKeyPrefix = "schedule.ddl.silent-refresh.last-attempt"
     private static let gate = Gate()
 
@@ -36,6 +39,8 @@ enum DDLSilentRefreshCoordinator {
     /// 这些约束统一由协调器内部处理。
     nonisolated static func refreshIfNeeded(trigger: String) {
         Task(priority: .utility) {
+            // 登录态和本地账号信息目前仍由主 actor 托管，因此这里先切回主线程
+            // 把参与静默同步判断的最小信息读出来，再在后台继续执行后续流程。
             let (fakeCookie, studentID) = await MainActor.run {
                 (
                     LoginStorage.shared.fakeCookie.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -46,6 +51,7 @@ enum DDLSilentRefreshCoordinator {
             guard !studentID.isEmpty else { return }
 
             await gate.runIfNeeded(for: studentID) {
+                // `ScheduleCacheStore` 仍是主端真相源的一部分，这里复用主 actor 上的快照。
                 let cache = await MainActor.run { ScheduleCacheStore.load() }
                 let hasLexueSyncHistory =
                     !cache.lexueCalendarURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
@@ -61,6 +67,7 @@ enum DDLSilentRefreshCoordinator {
                 UserDefaults.standard.set(todayStamp, forKey: attemptKey)
 
                 do {
+                    // `ScheduleService` 当前还依赖主端登录态与 cookie 存储，因此在主 actor 上构造。
                     let service = await MainActor.run { ScheduleService() }
                     let manualEvents = cache.ddlEvents.filter { $0.group != "lexue" }
                     let payload = try await service.syncDDLEvents(
@@ -72,6 +79,7 @@ enum DDLSilentRefreshCoordinator {
                     updatedCache.lexueCalendarURL = payload.url
                     updatedCache.ddlEvents = (manualEvents + payload.events).sorted { $0.dueAt < $1.dueAt }
                     let cacheToSave = updatedCache
+                    // 保存动作会顺带触发共享快照导出与外部展示刷新，因此也回到主 actor 执行。
                     await MainActor.run { ScheduleCacheStore.save(cacheToSave) }
                 } catch {
                     // 静默同步失败不打断前台，也不弹提示。

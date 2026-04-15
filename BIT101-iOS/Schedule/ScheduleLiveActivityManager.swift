@@ -346,14 +346,14 @@ final class ScheduleLiveActivityManager {
                 for week in course.weeks {
                     guard let startSlot = slotMap[course.startSection],
                           let endSlot = slotMap[course.endSection],
-                          let start = combine(firstDay: firstDay, week: week, weekday: course.weekday, time: startSlot.start),
-                          let end = combine(firstDay: firstDay, week: week, weekday: course.weekday, time: endSlot.end),
+                          let start = ScheduleSharedDateCodec.combine(firstDay: firstDay, week: week, weekday: course.weekday, time: startSlot.start),
+                          let end = ScheduleSharedDateCodec.combine(firstDay: firstDay, week: week, weekday: course.weekday, time: endSlot.end),
                           end > now else { continue }
                     
                     results.append(CourseReminderOccurrence(
                         kindText: "上课",
-                        title: normalizeCourseTitle(course.name),
-                        classroom: normalizeClassroom(course.classroom),
+                        title: ScheduleDisplayNormalizer.normalizeCourseTitle(course.name),
+                        classroom: ScheduleDisplayNormalizer.normalizeClassroom(course.classroom),
                         teacher: course.teacher,
                         startDate: start,
                         endDate: end
@@ -365,8 +365,8 @@ final class ScheduleLiveActivityManager {
         // 处理自定义日程
         for schedule in cache.customSchedules {
             guard let date = ScheduleDateCodec.parseDate(schedule.dateString),
-                  let start = combine(date: date, time: schedule.beginTime),
-                  let end = combine(date: date, time: schedule.endTime),
+                  let start = ScheduleSharedDateCodec.combine(date: date, time: schedule.beginTime),
+                  let end = ScheduleSharedDateCodec.combine(date: date, time: schedule.endTime),
                   end > now else { continue }
             
             results.append(CourseReminderOccurrence(
@@ -380,32 +380,6 @@ final class ScheduleLiveActivityManager {
         }
 
         return results.sorted { $0.startDate < $1.startDate }
-    }
-
-    /// 把“首周日期 + 教学周 + 星期 + 节次时间”换算成真实日期时间。
-    private func combine(firstDay: Date, week: Int, weekday: Int, time: String) -> Date? {
-        let offset = (week - 1) * 7 + (weekday - 1)
-        guard let day = Calendar.current.date(byAdding: .day, value: offset, to: firstDay) else { return nil }
-        return combine(date: day, time: time)
-    }
-
-    /// 把某一天和 `HH:mm` 形式的时间文本合成一个绝对时间点。
-    private func combine(date: Date, time: String) -> Date? {
-        let parts = time.split(separator: ":").compactMap { Int($0) }
-        guard parts.count == 2 else { return nil }
-        var components = Calendar.current.dateComponents([.year, .month, .day], from: date)
-        components.hour = parts[0]
-        components.minute = parts[1]
-        components.second = 0
-        return Calendar.current.date(from: components)
-    }
-
-    private func normalizeClassroom(_ value: String) -> String {
-        value.replacingOccurrences(of: "理教楼", with: "理教").replacingOccurrences(of: "文萃楼", with: "文萃")
-    }
-
-    private func normalizeCourseTitle(_ value: String) -> String {
-        value.hasPrefix("体育/") ? String(value.dropFirst(3)) : value
     }
 
     /// 计算某条提醒的实际显示起点。
