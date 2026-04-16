@@ -105,8 +105,8 @@ struct AppShellView: View {
     private static let startupNoticeTitle = "1.5.2 版本更新"
     private static let startupNoticeBody = """
     1、Apple Watch 课表 complication 现已支持圆形 / 角标 / inline / 矩形四种样式
-    2、补充并统一大量教学楼、场馆与运动场地缩写规则
-    3、优化角标 complication 的日期与时间显示文案
+    2、手表 App 现支持左右滑动，右侧可重新同步或清除本地课表缓存
+    3、补充并统一大量教学楼、场馆与运动场地缩写规则
     4、修复若干已知问题
     """
     private static let widgetUsageGuideTitle = "非常有用的几个用法"

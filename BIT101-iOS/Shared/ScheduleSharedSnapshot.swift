@@ -137,6 +137,14 @@ enum ScheduleExternalSnapshotStore {
         return try? decoder.decode(ScheduleExternalSnapshot.self, from: data)
     }
 
+    static func clear() {
+        guard let fileURL else { return }
+        try? FileManager.default.removeItem(at: fileURL)
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .scheduleExternalSnapshotDidChange, object: nil)
+        }
+    }
+
     static var fileURL: URL? {
         guard
             let containerURL = FileManager.default.containerURL(

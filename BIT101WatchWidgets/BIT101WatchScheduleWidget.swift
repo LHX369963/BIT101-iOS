@@ -237,43 +237,43 @@ private struct WatchScheduleRectangularView: View {
 
     var body: some View {
         if let summary = entry.displaySummary {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading) {
                 HStack(alignment: .firstTextBaseline) {
                     Text("下一节")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                    Spacer(minLength: 4)
+                    Spacer(minLength: 0)
 
                     Text(summary.dateText)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
                 }
 
-                Text(summary.location.lightText)
+                Text(summary.courseTitle.isEmpty ? summary.location.lightText : summary.courseTitle)
                     .font(.headline.weight(.semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-
-                Text(summary.rangeText)
-                    .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
 
-                if !summary.courseTitle.isEmpty {
-                    Text(summary.courseTitle)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                HStack(alignment: .firstTextBaseline) {
+                    Text(summary.rangeText)
+                        .font(.headline.weight(.semibold))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.75)
+                        .minimumScaleFactor(0.7)
+
+                    Spacer(minLength: 4)
+
+                    Text(summary.location.lightText)
+                        .font(.headline.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                 }
             }
         } else {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading) {
                 Text(entry.message ?? watchScheduleWidgetRestMessage)
                     .font(.headline)
                     .fixedSize(horizontal: false, vertical: true)
-
                 if entry.message == watchScheduleWidgetCampusNetworkMessage {
                     Text("先打开手机 App。")
                         .font(.caption)
