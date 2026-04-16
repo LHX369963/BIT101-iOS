@@ -10,9 +10,7 @@ import Foundation
 enum ScheduleDisplayNormalizer {
     /// 压缩教室名称里的冗长楼名，提升小屏与卡片场景下的可读性。
     static func normalizeClassroom(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "理教楼", with: "理教")
-            .replacingOccurrences(of: "文萃楼", with: "文萃")
+        compactLocation(for: value).lightText
     }
 
     /// 对课程标题做本地展示优化。
@@ -24,6 +22,194 @@ enum ScheduleDisplayNormalizer {
         }
         return value
     }
+
+    /// 将地点压缩成 complication 友好的楼名 / 教室结构。
+    static func compactLocation(for value: String) -> ScheduleCompactLocation {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return ScheduleCompactLocation(lightText: "", maxText: "", lightBuilding: "", maxBuilding: "", room: nil)
+        }
+
+        let normalizedLightText = normalizeLocationText(trimmed, mode: .light)
+        let normalizedMaxText = normalizeLocationText(trimmed, mode: .max)
+
+        let buildingPair = normalizedBuildingPair(
+            lightText: normalizedLightText,
+            maxText: normalizedMaxText
+        )
+        let room = extractRoom(from: normalizedLightText, building: buildingPair.light)
+
+        return ScheduleCompactLocation(
+            lightText: normalizedLightText,
+            maxText: normalizedMaxText,
+            lightBuilding: buildingPair.light,
+            maxBuilding: buildingPair.max,
+            room: room
+        )
+    }
+
+    private enum LocationAbbreviationMode {
+        case light
+        case max
+    }
+
+    private struct LocationAbbreviationRule {
+        let source: String
+        let light: String
+        let max: String
+    }
+
+    private static let campusPrefixes = [
+        "良乡校区",
+        "中关村校区",
+        "珠海校区",
+    ]
+
+    private static let locationAbbreviationRules: [LocationAbbreviationRule] = {
+        var rules: [LocationAbbreviationRule] = [
+            .init(source: "中关村体育馆地下羽毛球场", light: "馆羽", max: "馆羽"),
+            .init(source: "中关村体育馆北厅140", light: "馆北厅", max: "馆北"),
+            .init(source: "良乡体育馆羽毛球场", light: "馆羽", max: "馆羽"),
+            .init(source: "良乡体育馆篮球场", light: "馆篮", max: "馆篮"),
+            .init(source: "良乡体育馆健身房", light: "馆健", max: "馆健"),
+            .init(source: "体育馆乐团排练厅", light: "馆排练", max: "馆排"),
+            .init(source: "体育馆夹层J13", light: "馆J13", max: "馆J13"),
+            .init(source: "羽毛球场（乒羽中心）", light: "羽球场", max: "羽球"),
+            .init(source: "轮滑场（西排球场）", light: "轮滑场", max: "轮滑"),
+            .init(source: "南校区排球场", light: "南排", max: "南排"),
+            .init(source: "南校区篮球场", light: "南篮", max: "南篮"),
+            .init(source: "南校区网球场", light: "南网", max: "南网"),
+            .init(source: "南校区足球场", light: "南足", max: "南足"),
+            .init(source: "游泳馆浅水区北侧", light: "游泳馆", max: "游泳"),
+            .init(source: "游泳馆浅水区南侧", light: "游泳馆", max: "游泳"),
+            .init(source: "游泳馆深水区", light: "游泳馆", max: "游泳"),
+            .init(source: "文体综合馆", light: "文体馆", max: "文体"),
+            .init(source: "篮球训练场", light: "篮球场", max: "篮球"),
+            .init(source: "足球场", light: "足球场", max: "足球"),
+            .init(source: "田径场主席台", light: "操场", max: "操场"),
+            .init(source: "中关村东操场主席台", light: "操场", max: "操场"),
+            .init(source: "田径场", light: "田径场", max: "田径"),
+            .init(source: "法学院智慧法治实验室", light: "法学楼", max: "法学"),
+            .init(source: "前沿交叉大楼", light: "前沿楼", max: "前沿"),
+            .init(source: "综合教学楼A", light: "综教A", max: "综A"),
+            .init(source: "综合教学楼B", light: "综教B", max: "综B"),
+            .init(source: "综教A", light: "综教A", max: "综A"),
+            .init(source: "综教B", light: "综教B", max: "综B"),
+            .init(source: "理科教学楼", light: "理教", max: "理教"),
+            .init(source: "工科实训楼", light: "工训", max: "工训"),
+            .init(source: "工程训练中心", light: "工训", max: "工训"),
+            .init(source: "良乡实训楼", light: "工训", max: "工训"),
+            .init(source: "实训楼", light: "工训", max: "工训"),
+            .init(source: "理学楼C座", light: "理学楼", max: "理学"),
+            .init(source: "理学楼A", light: "理学楼", max: "理学"),
+            .init(source: "理学B2", light: "理学楼", max: "理学"),
+            .init(source: "理学C1", light: "理学楼", max: "理学"),
+            .init(source: "理学C", light: "理学楼", max: "理学"),
+            .init(source: "5号教学楼", light: "5号楼", max: "5号"),
+            .init(source: "6号教学楼", light: "6号楼", max: "6号"),
+            .init(source: "9号教学楼", light: "9号楼", max: "9号"),
+            .init(source: "疏桐园A地下", light: "疏桐", max: "疏桐"),
+            .init(source: "良乡体育馆", light: "体馆", max: "体馆"),
+            .init(source: "交叉大楼", light: "交叉楼", max: "交叉"),
+            .init(source: "行政楼", light: "行政楼", max: "行政"),
+            .init(source: "天佑楼T", light: "天佑楼", max: "天佑"),
+            .init(source: "工业生态楼", light: "工业楼", max: "工业"),
+            .init(source: "化学实验中心", light: "化学楼", max: "化学"),
+            .init(source: "宇航楼", light: "宇航楼", max: "宇航"),
+            .init(source: "西山阻燃中心", light: "西山", max: "西山"),
+            .init(source: "南操场", light: "南操场", max: "操场"),
+            .init(source: "5号楼", light: "5号楼", max: "5号"),
+            .init(source: "6号楼", light: "6号楼", max: "6号"),
+            .init(source: "8号楼", light: "8号楼", max: "8号"),
+            .init(source: "9号楼", light: "9号楼", max: "9号"),
+            .init(source: "3号楼", light: "3号楼", max: "3号"),
+            .init(source: "主楼", light: "主楼", max: "主楼"),
+            .init(source: "中教", light: "中教", max: "中教"),
+            .init(source: "研楼", light: "研楼", max: "研楼"),
+            .init(source: "理教楼", light: "理教", max: "理教"),
+        ]
+
+        for suffix in UInt8(ascii: "A")...UInt8(ascii: "M") {
+            let letter = String(UnicodeScalar(suffix))
+            rules.append(.init(source: "文萃楼\(letter)", light: "文萃\(letter)", max: "文\(letter)"))
+        }
+
+        return rules.sorted { lhs, rhs in
+            if lhs.source.count != rhs.source.count {
+                return lhs.source.count > rhs.source.count
+            }
+            return lhs.source > rhs.source
+        }
+    }()
+
+    private static let knownBuildingPairs: [(light: String, max: String)] = {
+        var pairs = locationAbbreviationRules.map { ($0.light, $0.max) }
+        pairs.append(("综教A", "综A"))
+        pairs.append(("综教B", "综B"))
+        for suffix in UInt8(ascii: "A")...UInt8(ascii: "M") {
+            let letter = String(UnicodeScalar(suffix))
+            pairs.append(("文萃\(letter)", "文\(letter)"))
+        }
+        return Array(Set(pairs.map { "\($0.0)\u{0}\($0.1)" }))
+            .map { token in
+                let parts = token.split(separator: "\u{0}", maxSplits: 1).map(String.init)
+                return (parts[0], parts[1])
+            }
+            .sorted { lhs, rhs in
+                if lhs.0.count != rhs.0.count {
+                    return lhs.0.count > rhs.0.count
+                }
+                return lhs.0 > rhs.0
+            }
+    }()
+
+    private static func normalizeLocationText(_ value: String, mode: LocationAbbreviationMode) -> String {
+        var normalized = value
+
+        for prefix in campusPrefixes {
+            normalized = normalized.replacingOccurrences(of: prefix, with: "")
+        }
+
+        for rule in locationAbbreviationRules {
+            normalized = normalized.replacingOccurrences(
+                of: rule.source,
+                with: mode == .light ? rule.light : rule.max
+            )
+        }
+
+        return normalized
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "－", with: "")
+            .replacingOccurrences(of: "—", with: "")
+            .replacingOccurrences(of: "–", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func normalizedBuildingPair(lightText: String, maxText: String) -> (light: String, max: String) {
+        if let pair = knownBuildingPairs.first(where: { lightText.hasPrefix($0.light) }) {
+            return pair
+        }
+
+        return (lightText, maxText)
+    }
+
+    private static func extractRoom(from text: String, building: String) -> String? {
+        guard text.hasPrefix(building) else { return nil }
+        let room = String(text.dropFirst(building.count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !room.isEmpty else { return nil }
+        return room
+    }
+}
+
+/// complication 展示时使用的地点结构。
+struct ScheduleCompactLocation: Hashable {
+    let lightText: String
+    let maxText: String
+    let lightBuilding: String
+    let maxBuilding: String
+    let room: String?
 }
 
 /// 日程相关跨 target 共用的日期编解码与时间组合工具。

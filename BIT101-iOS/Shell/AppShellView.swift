@@ -102,13 +102,12 @@ enum AppTab: String, Identifiable, Codable {
 ///
 /// 壳层只关心两件事：按照设置中心决定展示哪些 tab，以及把退出登录回调继续往下传。
 struct AppShellView: View {
-    private static let startupNoticeTitle = "1.5.1 版本更新"
+    private static let startupNoticeTitle = "1.5.2 版本更新"
     private static let startupNoticeBody = """
-    1、课表课程详情支持“调这节课 / 调这门课”
-    2、现在可以只调整当前周这一节课，不会误伤整门课
-    3、收口 Apple Watch / Smart Stack 的课表解析逻辑，减少重复实现
-    4、优化手表与手机之间的课表同步代码路径，提升稳定性
-    5、修复若干已知问题
+    1、Apple Watch 课表 complication 现已支持圆形 / 角标 / inline / 矩形四种样式
+    2、补充并统一大量教学楼、场馆与运动场地缩写规则
+    3、优化角标 complication 的日期与时间显示文案
+    4、修复若干已知问题
     """
     private static let widgetUsageGuideTitle = "非常有用的几个用法"
     private static let widgetUsageGuideBody = """
