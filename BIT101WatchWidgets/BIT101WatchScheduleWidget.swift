@@ -37,11 +37,7 @@ private struct WatchScheduleDisplaySummary {
         self.dateText = dateText
         self.courseTitle = courseTitle
 
-        var inlineParts = [compactLocation.lightText, startTimeText, dateText]
-        if !courseTitle.isEmpty {
-            inlineParts.append(courseTitle)
-        }
-        self.inlineText = inlineParts
+        self.inlineText = [compactLocation.maxText, startTimeText, dateText]
             .filter { !$0.isEmpty }
             .joined(separator: " · ")
     }
