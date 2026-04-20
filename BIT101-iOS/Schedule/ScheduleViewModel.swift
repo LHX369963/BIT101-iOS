@@ -258,6 +258,9 @@ final class ScheduleViewModel: ObservableObject {
 
         // 页面先读本地缓存，确保一打开就有内容，避免每次冷启动都重新同步。
         reloadFromDisk()
+        #if canImport(CloudKit)
+        await ScheduleCloudSyncManager.shared.refreshFromCloudIfNeeded()
+        #endif
         isLoadingCache = false
     }
 
@@ -498,6 +501,23 @@ final class ScheduleViewModel: ObservableObject {
     func setShowExamInfo(_ value: Bool) {
         cache.showExamInfo = value
         persist()
+    }
+
+    func setICloudSyncEnabled(_ value: Bool) {
+        guard cache.iCloudSyncEnabled != value else { return }
+        cache.iCloudSyncEnabled = value
+
+        if value {
+            persist(source: .localWithoutCloudPush)
+            #if canImport(CloudKit)
+            let localCache = cache
+            Task {
+                await ScheduleCloudSyncManager.shared.reconcileAfterEnabling(localCache: localCache)
+            }
+            #endif
+        } else {
+            persist(source: .localWithoutCloudPush)
+        }
     }
 
     /// 设置是否启用课程提醒 Live Activity。
@@ -1337,8 +1357,8 @@ final class ScheduleViewModel: ObservableObject {
     }
 
     /// 写回缓存。
-    private func persist() {
-        ScheduleCacheStore.save(cache)
+    private func persist(source: ScheduleCacheStore.SaveSource = .local) {
+        ScheduleCacheStore.save(cache, source: source)
     }
 
     /// 从“最近下一节课”的教室名推导最匹配的教学楼。

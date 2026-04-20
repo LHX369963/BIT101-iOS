@@ -540,6 +540,7 @@ private struct CalendarSettingsPage: View {
     @State private var isShowingEmptyScheduleExportConfirmation = false
     @State private var isShowingSharedScheduleImportGuide = false
     @State private var isShowingLiveActivityExperimentalWarning = false
+    @State private var isShowingICloudSyncExperimentalWarning = false
     @State private var shouldOpenImportSheetAfterGuide = false
     @State private var exportedScheduleCode: ExportedScheduleCode?
     @State private var importDraft: ScheduleImportDraft?
@@ -554,6 +555,17 @@ private struct CalendarSettingsPage: View {
             Section("数据设置") {
                 LabeledContent("当前学期", value: viewModel.cache.currentTerm.isEmpty ? "未设置" : viewModel.cache.currentTerm)
                 LabeledContent("学期起始日期", value: viewModel.firstDayDescription)
+
+                Toggle("iCloud 实时同步（实验性）", isOn: Binding(
+                    get: { viewModel.cache.iCloudSyncEnabled },
+                    set: { enabled in
+                        if enabled {
+                            isShowingICloudSyncExperimentalWarning = true
+                        } else {
+                            viewModel.setICloudSyncEnabled(false)
+                        }
+                    }
+                ))
 
                 Button {
                     Task { await viewModel.syncCourses() }
@@ -624,7 +636,7 @@ private struct CalendarSettingsPage: View {
                 Toggle("显示节次分割线", isOn: Binding(get: { viewModel.cache.showDivider }, set: viewModel.setShowDivider))
                 Toggle("显示当前时间线", isOn: Binding(get: { viewModel.cache.showCurrentTime }, set: viewModel.setShowCurrentTime))
                 Toggle("显示考试安排", isOn: Binding(get: { viewModel.cache.showExamInfo }, set: viewModel.setShowExamInfo))
-                Toggle("显示灵动岛提醒（实验）", isOn: Binding(
+                Toggle("显示灵动岛提醒（实验性）", isOn: Binding(
                     get: { viewModel.cache.showCourseLiveActivityReminder },
                     set: { enabled in
                         if enabled {
@@ -735,6 +747,14 @@ private struct CalendarSettingsPage: View {
         } message: {
             Text("开发者和 AI 尚未完全摸清楚灵动岛的运作机理和唤醒条件。虽然做了多重兜底，但仍不能保证每节课都能按时通知。继续打开视为已知悉此风险。")
         }
+        .alert("实验性功能提醒", isPresented: $isShowingICloudSyncExperimentalWarning) {
+            Button("取消", role: .cancel) {}
+            Button("继续打开") {
+                viewModel.setICloudSyncEnabled(true)
+            }
+        } message: {
+            Text("iCloud 实时同步目前仍属实验性功能。首次开启后会尝试把当前账号的课表、考试、DDL、自定义课程、分享课表和显示偏好同步到你的 iCloud 私有数据库；如果多设备同时修改，可能短时间内出现延迟或覆盖。")
+        }
         .alert("导入分享课表提示", isPresented: $isShowingSharedScheduleImportGuide) {
             Button("知道了") {
                 appSettings.markSharedScheduleImportGuideSeen()
@@ -808,6 +828,15 @@ private struct CalendarSettingsPage: View {
         }
 
         let prefix = "BIT101SCH1:"
+        if !trimmed.hasPrefix(prefix),
+           let colonIndex = trimmed.firstIndex(of: ":"),
+           trimmed.hasPrefix("BIT101SCH") {
+            let versionToken = trimmed[trimmed.index(trimmed.startIndex, offsetBy: "BIT101SCH".count) ..< colonIndex]
+            if let version = Int(versionToken), version > 1 {
+                throw NSError(domain: "BIT101.ScheduleImport", code: -1, userInfo: [NSLocalizedDescriptionKey: "对方版本更高，请更新版本后再导入。"])
+            }
+        }
+
         guard trimmed.hasPrefix(prefix) else {
             throw NSError(domain: "BIT101.ScheduleImport", code: -1, userInfo: [NSLocalizedDescriptionKey: "课表编码格式不正确。"])
         }
@@ -1310,6 +1339,7 @@ private struct AboutSettingsPage: View {
     @ObservedObject private var settings = AppSettingsStore.shared
     @State private var alert: LoginAlert?
     @State private var isResettingLocalData = false
+    @State private var isClearingCaches = false
     @State private var isShowingResetConfirmation = false
     @State private var isShowingWidgetUsageGuide = false
 
@@ -1356,6 +1386,20 @@ private struct AboutSettingsPage: View {
             }
 
             Section("调试") {
+                Button {
+                    Task { await clearCaches() }
+                } label: {
+                    HStack {
+                        Text("清理缓存")
+                        Spacer()
+                        if isClearingCaches {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
+                }
+                .disabled(isClearingCaches || isResettingLocalData)
+
                 Button(role: .destructive) {
                     isShowingResetConfirmation = true
                 } label: {
@@ -1368,9 +1412,9 @@ private struct AboutSettingsPage: View {
                         }
                     }
                 }
-                .disabled(isResettingLocalData)
+                .disabled(isResettingLocalData || isClearingCaches)
 
-                Text("会清除本地登录信息、设置、课表/DDL缓存、Cookie 和网页数据，并退回登录页。")
+                Text("“清理缓存”只会清空临时文件、图片缓存和网络缓存；“删除所有文稿与数据”会清除本地登录信息、设置、课表/DDL缓存、Cookie 和网页数据，并退回登录页。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -1413,6 +1457,33 @@ private struct AboutSettingsPage: View {
     }
 
     /// 清空 bundle 对应的 `UserDefaults` 域。
+    @MainActor
+    private func clearCaches() async {
+        guard !isClearingCaches, !isResettingLocalData else { return }
+        isClearingCaches = true
+        defer { isClearingCaches = false }
+
+        let manager = FileManager.default
+        let cachesURL = manager.urls(for: .cachesDirectory, in: .userDomainMask).first
+        let temporaryURL = manager.temporaryDirectory
+        let reclaimedBytes = (cachesURL.map { directorySize(at: $0) } ?? 0) + directorySize(at: temporaryURL)
+
+        if let cachesURL {
+            deleteContents(of: cachesURL, using: manager)
+        }
+        deleteContents(of: temporaryURL, using: manager)
+        URLCache.shared.removeAllCachedResponses()
+        await CachedRemoteImageCacheMaintenance.clearAll()
+
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useMB]
+        formatter.countStyle = .file
+        formatter.includesUnit = true
+        formatter.isAdaptive = true
+        let formatted = formatter.string(fromByteCount: max(reclaimedBytes, 0))
+        alert = LoginAlert(title: "清理完成", message: "已清理约 \(formatted) 缓存。")
+    }
+
     private func clearUserDefaults() {
         if let bundleID = Bundle.main.bundleIdentifier {
             UserDefaults.standard.removePersistentDomain(forName: bundleID)
@@ -1449,6 +1520,29 @@ private struct AboutSettingsPage: View {
         for url in urls {
             try? manager.removeItem(at: url)
         }
+    }
+
+    private func directorySize(at directory: URL) -> Int64 {
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+
+        var total: Int64 = 0
+        for case let url as URL in enumerator {
+            guard
+                let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                values.isRegularFile == true,
+                let fileSize = values.fileSize
+            else {
+                continue
+            }
+            total += Int64(fileSize)
+        }
+        return total
     }
 
     /// 清空 `WKWebView` 相关站点数据。

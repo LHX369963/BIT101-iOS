@@ -102,12 +102,11 @@ enum AppTab: String, Identifiable, Codable {
 ///
 /// 壳层只关心两件事：按照设置中心决定展示哪些 tab，以及把退出登录回调继续往下传。
 struct AppShellView: View {
-    private static let startupNoticeTitle = "1.5.2 版本更新"
+    private static let startupNoticeTitle = "1.5.3 版本更新"
     private static let startupNoticeBody = """
-    1、Apple Watch 课表 complication 现已支持圆形 / 角标 / inline / 矩形四种样式
-    2、手表 App 现支持左右滑动，右侧可重新同步或清除本地课表缓存
-    3、补充并统一大量教学楼、场馆与运动场地缩写规则
-    4、修复若干已知问题
+    1、设置页新增“清理缓存”
+    2、课表现已支持 iCloud 实时同步（实验性）
+    3、优化若干细节并修复已知问题
     """
     private static let widgetUsageGuideTitle = "非常有用的几个用法"
     private static let widgetUsageGuideBody = """

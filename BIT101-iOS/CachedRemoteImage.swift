@@ -104,6 +104,12 @@ private final class CachedRemoteImageLoader: ObservableObject {
 /// 头像图片的轻量本地缓存。
 ///
 /// 这里不走复杂的 LRU 或 HTTP 协商，目标只是把频繁重复使用的头像稳定落到本地缓存目录。
+enum CachedRemoteImageCacheMaintenance {
+    static func clearAll() async {
+        await CachedRemoteImageStore.shared.clearAll()
+    }
+}
+
 private actor CachedRemoteImageStore {
     /// 全局唯一缓存实例，避免不同页面各自维护重复的磁盘目录和内存缓存。
     static let shared = CachedRemoteImageStore()
@@ -154,6 +160,22 @@ private actor CachedRemoteImageStore {
         memoryCache.setObject(data as NSData, forKey: key as NSString)
         let fileURL = directoryURL.appendingPathComponent(key)
         try? data.write(to: fileURL, options: .atomic)
+    }
+
+    /// 清空当前进程内和磁盘上的远程图片缓存。
+    func clearAll() {
+        memoryCache.removeAllObjects()
+
+        guard fileManager.fileExists(atPath: directoryURL.path) else { return }
+        if let children = try? fileManager.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for child in children {
+                try? fileManager.removeItem(at: child)
+            }
+        }
     }
 
     /// 把 URL 转成稳定文件名。

@@ -6,6 +6,9 @@
 //
 
 import Foundation
+#if canImport(CloudKit)
+import CloudKit
+#endif
 
 /// 课表名称的统一长度上限。
 ///
@@ -295,6 +298,8 @@ struct ScheduleCache: Codable {
     var courseLiveActivityLeadMinutes = 20
     var timeTable: [TimeSlot] = TimeSlot.default
     var sharedSchedules: [SharedScheduleRecord] = []
+    var iCloudSyncEnabled = false
+    var updatedAt: Date = .distantPast
 
     /// 首周日期的解码结果，便于课表直接计算当前周数。
     var firstDay: Date? {
@@ -327,6 +332,8 @@ struct ScheduleCache: Codable {
         case courseLiveActivityLeadMinutes
         case timeTable
         case sharedSchedules
+        case iCloudSyncEnabled
+        case updatedAt
     }
 
     /// 提供一份带默认值的空缓存。
@@ -369,6 +376,8 @@ struct ScheduleCache: Codable {
             schedule.title = Self.clampedScheduleTitle(schedule.title)
             return schedule
         }
+        iCloudSyncEnabled = try container.decodeIfPresent(Bool.self, forKey: .iCloudSyncEnabled) ?? false
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? .distantPast
     }
 
     /// 把课表标题裁到统一长度上限。
@@ -396,6 +405,22 @@ struct ScheduleExportPayload: Codable {
     let timeTable: [TimeSlot]
     let courses: [CourseRecord]
 
+    init(
+        formatVersion: Int,
+        exportedAt: Date,
+        currentTerm: String,
+        firstDayString: String,
+        timeTable: [TimeSlot],
+        courses: [CourseRecord]
+    ) {
+        self.formatVersion = formatVersion
+        self.exportedAt = exportedAt
+        self.currentTerm = currentTerm
+        self.firstDayString = firstDayString
+        self.timeTable = timeTable
+        self.courses = courses
+    }
+
     init(cache: ScheduleCache, exportedAt: Date = Date()) {
         self.formatVersion = 1
         self.exportedAt = exportedAt
@@ -408,6 +433,208 @@ struct ScheduleExportPayload: Codable {
     /// 导出是否具备最基本的课表内容。
     var isEmpty: Bool {
         courses.isEmpty
+    }
+}
+
+/// 课表分享编码的实验性紧凑载荷 V2。
+///
+/// 这是一份**已正式定义、但当前并未启用**的备用协议，目标是在未来替换现有
+/// `ScheduleExportPayload`（V1）时，把分享码进一步缩短。
+///
+/// ## 设计约束
+/// - 继续复用现有外层包装：`lzfse + base64`
+/// - 仍然使用 JSON 作为“压缩前明文”，避免引入完全自定义协议
+/// - 但 JSON 改成**纯数组结构**，去掉冗余 key
+/// - 只分享“排课骨架”，不分享本机运行环境
+///
+/// ## 当前正式定义
+/// 最外层布局固定为：
+///
+/// ```text
+/// [
+///   2,
+///   [
+///     [课程名, 教师, 教室, 周次数组, 星期, 开始节, 结束节],
+///     ...
+///   ]
+/// ]
+/// ```
+///
+/// 其中：
+/// - 第 0 项永远是格式版本号 `2`
+/// - 第 1 项是课程数组
+/// - 每一门课都按固定顺序编码成 7 项数组，不再携带字段名
+///
+/// ## 明确不包含的内容
+/// V2 **故意不携带**以下信息：
+/// - 首周日期
+/// - 时间表
+/// - 考试
+/// - DDL
+/// - 自定义日程
+/// - 课表显示偏好
+///
+/// 原因是分享课表的目标只是复用“课程排布”，而不是复制发送方的整套本地环境。
+/// 当前产品里，用户在能导入/查看分享课表之前，必然已经先同步过自己的课表；
+/// 因此导入时可直接复用本机现有的：
+/// - `currentTerm`
+/// - `firstDayString`
+/// - `timeTable`
+///
+/// ## 为什么先定义、暂不启用
+/// 这份协议已经可以作为未来的 `BIT101SCH2` 使用，但当前版本仍默认导出 V1。
+/// 提前把 V2 的结构、注释和解码逻辑埋进代码，主要是为了：
+/// 1. 提前固定格式，避免以后不同分支各自发明一种“V2”
+/// 2. 让未来切换导出算法时，不需要再重新讨论字段顺序
+/// 3. 与当前已加好的“高版本分享码提示更新”兜底配套
+struct ScheduleExportCompactPayloadV2: Codable {
+    static let formatVersion = 2
+
+    /// V2 内部单门课的极简表示。
+    ///
+    /// 字段顺序必须稳定，因为压缩后的导入端完全依赖位置还原含义。
+    struct CompactCourse: Codable, Hashable {
+        let name: String
+        let teacher: String
+        let classroom: String
+        let weeks: [Int]
+        let weekday: Int
+        let startSection: Int
+        let endSection: Int
+
+        nonisolated init(
+            name: String,
+            teacher: String,
+            classroom: String,
+            weeks: [Int],
+            weekday: Int,
+            startSection: Int,
+            endSection: Int
+        ) {
+            self.name = name
+            self.teacher = teacher
+            self.classroom = classroom
+            self.weeks = weeks
+            self.weekday = weekday
+            self.startSection = startSection
+            self.endSection = endSection
+        }
+
+        nonisolated init(course: CourseRecord) {
+            self.init(
+                name: course.name,
+                teacher: course.teacher,
+                classroom: course.classroom,
+                weeks: course.weeks,
+                weekday: course.weekday,
+                startSection: course.startSection,
+                endSection: course.endSection
+            )
+        }
+
+        /// 把极简课程重新扩展成完整的 `CourseRecord`。
+        ///
+        /// 这里会显式使用导入侧本机已经存在的课表环境作为补全来源。
+        /// 当前策略是：
+        /// - `term` 复用本机当前学期
+        /// - 其余未分享字段统一回填为空或 0
+        ///
+        /// 之所以保留这个还原入口，即使当前还没正式启用 V2，也是为了让
+        /// “协议定义” 和 “未来导入如何落地” 写在同一个地方，避免以后切换时遗漏。
+        func expandedCourse(term: String) -> CourseRecord {
+            CourseRecord(
+                id: UUID().uuidString,
+                term: term,
+                name: name,
+                teacher: teacher,
+                classroom: classroom,
+                description: "",
+                weeks: weeks,
+                weekday: weekday,
+                startSection: startSection,
+                endSection: endSection,
+                campus: "",
+                number: "",
+                credit: 0,
+                hour: 0,
+                type: "",
+                category: "",
+                department: ""
+            )
+        }
+    }
+
+    let courses: [CompactCourse]
+
+    init(cache: ScheduleCache) {
+        self.courses = cache.courses.map(CompactCourse.init(course:))
+    }
+
+    init(payload: ScheduleExportPayload) {
+        self.courses = payload.courses.map(CompactCourse.init(course:))
+    }
+
+    var isEmpty: Bool { courses.isEmpty }
+
+    /// 用导入侧的本机环境，把 V2 重新还原成 V1 等价载荷。
+    ///
+    /// 这不是说未来一定要先“V2 -> V1 -> SharedScheduleRecord”两跳转换，
+    /// 而是为了把 V2 缺失字段的补全规则先写清楚，避免真正启用时出现歧义。
+    func expandedPayload(using cache: ScheduleCache, importedAt: Date = Date()) -> ScheduleExportPayload {
+        ScheduleExportPayload(
+            formatVersion: 1,
+            exportedAt: importedAt,
+            currentTerm: cache.currentTerm,
+            firstDayString: cache.firstDayString,
+            timeTable: cache.timeTable,
+            courses: courses.map { $0.expandedCourse(term: cache.currentTerm) }
+        )
+    }
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        let version = try container.decode(Int.self)
+        guard version == Self.formatVersion else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "不支持的紧凑课表分享格式版本：\(version)"
+            )
+        }
+
+        var coursesContainer = try container.nestedUnkeyedContainer()
+        var decodedCourses: [CompactCourse] = []
+        while !coursesContainer.isAtEnd {
+            var course = try coursesContainer.nestedUnkeyedContainer()
+            decodedCourses.append(
+                CompactCourse(
+                    name: try course.decode(String.self),
+                    teacher: try course.decode(String.self),
+                    classroom: try course.decode(String.self),
+                    weeks: try course.decode([Int].self),
+                    weekday: try course.decode(Int.self),
+                    startSection: try course.decode(Int.self),
+                    endSection: try course.decode(Int.self)
+                )
+            )
+        }
+        courses = decodedCourses
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.unkeyedContainer()
+        try container.encode(Self.formatVersion)
+
+        var coursesContainer = container.nestedUnkeyedContainer()
+        for course in courses {
+            var encodedCourse = coursesContainer.nestedUnkeyedContainer()
+            try encodedCourse.encode(course.name)
+            try encodedCourse.encode(course.teacher)
+            try encodedCourse.encode(course.classroom)
+            try encodedCourse.encode(course.weeks)
+            try encodedCourse.encode(course.weekday)
+            try encodedCourse.encode(course.startSection)
+            try encodedCourse.encode(course.endSection)
+        }
     }
 }
 
@@ -533,6 +760,12 @@ enum ScheduleDateCodec {
 ///
 /// 统一负责 `ScheduleCache` 的磁盘读写和变更通知发送。
 enum ScheduleCacheStore {
+    enum SaveSource {
+        case local
+        case localWithoutCloudPush
+        case cloud
+    }
+
     private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -558,7 +791,7 @@ enum ScheduleCacheStore {
     }
 
     /// 把当前学号转换成安全的目录名。
-    private static func currentAccountIdentifier() -> String {
+    static func currentAccountIdentifier() -> String {
         let raw = LoginStorage.shared.currentStudentID.trimmingCharacters(in: .whitespacesAndNewlines)
         if raw.isEmpty {
             return "__default__"
@@ -581,16 +814,28 @@ enum ScheduleCacheStore {
     }
 
     /// 写回缓存，并同步触发小组件导出和全局变更通知。
-    static func save(_ cache: ScheduleCache) {
+    static func save(_ cache: ScheduleCache, source: SaveSource = .local) {
         let url = fileURL
         let directory = url.deletingLastPathComponent()
+        var cacheToSave = cache
+
+        if source == .local {
+            cacheToSave.updatedAt = Date()
+        }
 
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let data = try encoder.encode(cache)
+            let data = try encoder.encode(cacheToSave)
             try data.write(to: url, options: [.atomic])
-            ScheduleWidgetExporter.sync(cache: cache)
+            ScheduleWidgetExporter.sync(cache: cacheToSave)
             postCacheDidChange()
+            #if canImport(CloudKit)
+            if source == .local, cacheToSave.iCloudSyncEnabled {
+                Task {
+                    await ScheduleCloudSyncManager.shared.pushLatestLocalCacheIfNeeded()
+                }
+            }
+            #endif
         } catch {}
     }
 
@@ -626,3 +871,123 @@ enum ScheduleCacheStore {
         }
     }
 }
+
+#if canImport(CloudKit)
+actor ScheduleCloudSyncManager {
+    static let shared = ScheduleCloudSyncManager()
+
+    private enum FieldKey {
+        static let studentID = "studentID"
+        static let payload = "payload"
+        static let updatedAt = "updatedAt"
+    }
+
+    private let container = CKContainer.default()
+    private let recordType = "ScheduleCacheSyncRecord"
+    private let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }()
+    private let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+
+    func refreshFromCloudIfNeeded() async {
+        let localCache = await MainActor.run { ScheduleCacheStore.load() }
+        guard localCache.iCloudSyncEnabled else { return }
+        await reconcile(localCache: localCache, allowCloudApply: true)
+    }
+
+    func reconcileAfterEnabling(localCache: ScheduleCache) async {
+        await reconcile(localCache: localCache, allowCloudApply: true)
+    }
+
+    func pushLatestLocalCacheIfNeeded() async {
+        let localCache = await MainActor.run { ScheduleCacheStore.load() }
+        guard localCache.iCloudSyncEnabled else { return }
+        _ = try? await upsert(remoteWith: localCache)
+    }
+
+    private func reconcile(localCache: ScheduleCache, allowCloudApply: Bool) async {
+        guard let recordID = await currentRecordID() else { return }
+
+        do {
+            let remoteRecord = try await container.privateCloudDatabase.record(for: recordID)
+            guard let remoteCache = decodeCache(from: remoteRecord) else { return }
+
+            if remoteCache.updatedAt > localCache.updatedAt, allowCloudApply {
+                let cacheToApply: ScheduleCache = {
+                    var cache = remoteCache
+                    cache.iCloudSyncEnabled = true
+                    return cache
+                }()
+                await MainActor.run {
+                    ScheduleCacheStore.save(cacheToApply, source: .cloud)
+                }
+                return
+            }
+
+            if localCache.updatedAt > remoteCache.updatedAt {
+                _ = try? await upsert(remoteWith: localCache)
+            }
+        } catch let error as CKError {
+            if error.code == .unknownItem {
+                var initialUpload = localCache
+                if initialUpload.updatedAt == .distantPast {
+                    initialUpload.updatedAt = Date()
+                }
+                _ = try? await upsert(remoteWith: initialUpload)
+            }
+        } catch {}
+    }
+
+    private func upsert(remoteWith cache: ScheduleCache) async throws -> CKRecord {
+        guard let recordID = await currentRecordID() else {
+            throw CKError(.badContainer)
+        }
+
+        let record: CKRecord
+        do {
+            record = try await container.privateCloudDatabase.record(for: recordID)
+        } catch let error as CKError where error.code == .unknownItem {
+            record = CKRecord(recordType: recordType, recordID: recordID)
+        }
+
+        let payload = try await encodeCache(cache)
+        record[FieldKey.studentID] = await currentStudentID() as CKRecordValue
+        record[FieldKey.updatedAt] = cache.updatedAt as CKRecordValue
+        record[FieldKey.payload] = payload as CKRecordValue
+        return try await container.privateCloudDatabase.save(record)
+    }
+
+    private func decodeCache(from record: CKRecord) -> ScheduleCache? {
+        guard let data = record[FieldKey.payload] as? Data else { return nil }
+        return try? MainActor.assumeIsolated {
+            try decoder.decode(ScheduleCache.self, from: data)
+        }
+    }
+
+    private func currentRecordID() async -> CKRecord.ID? {
+        let studentID = await currentStudentID()
+        guard !studentID.isEmpty else { return nil }
+        let account = await MainActor.run { ScheduleCacheStore.currentAccountIdentifier() }
+        return CKRecord.ID(recordName: "schedule-cache-\(account)")
+    }
+
+    private func currentStudentID() async -> String {
+        await MainActor.run {
+            LoginStorage.shared.currentStudentID.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    private func encodeCache(_ cache: ScheduleCache) async throws -> Data {
+        try await MainActor.run {
+            try encoder.encode(cache)
+        }
+    }
+}
+#endif

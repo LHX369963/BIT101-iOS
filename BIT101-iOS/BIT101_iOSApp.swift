@@ -261,6 +261,15 @@ struct BIT101_iOSApp: App {
         }
     }
 
+    private func refreshScheduleCloudSyncIfNeeded(trigger: String) {
+        #if canImport(CloudKit)
+        Task {
+            await ScheduleCloudSyncManager.shared.refreshFromCloudIfNeeded()
+            _ = trigger
+        }
+        #endif
+    }
+
     /// 根场景定义。
     ///
     /// 当前应用只有一个主窗口，主题模式直接由设置中心快照驱动。
@@ -284,11 +293,13 @@ struct BIT101_iOSApp: App {
 
                     // 启动时补做一次导出与提醒刷新，保证外部展示拿到的是当前账号的最新缓存。
                     refreshScheduleExternalDisplays(trigger: "app_launch_task", syncWidgetSnapshot: true)
+                    refreshScheduleCloudSyncIfNeeded(trigger: "app_launch_task")
                     DDLSilentRefreshCoordinator.refreshIfNeeded(trigger: "app_launch_task")
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .loginStorageDidChange)) { _ in
                     // 切换账号后，组件和灵动岛必须立即改读新账号的缓存。
                     refreshScheduleExternalDisplays(trigger: "login_storage_changed", syncWidgetSnapshot: true)
+                    refreshScheduleCloudSyncIfNeeded(trigger: "login_storage_changed")
                     DDLSilentRefreshCoordinator.refreshIfNeeded(trigger: "login_storage_changed")
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .scheduleCacheDidChange)) { _ in
@@ -302,6 +313,7 @@ struct BIT101_iOSApp: App {
                 // 应用重新回到前台时，同时补做一次 widget 快照导出与时间线刷新。
                 // 否则即便用户主动打开 app，桌面/锁屏小组件也可能继续沿用后台停留期间的旧条目。
                 refreshScheduleExternalDisplays(trigger: "scene_active", syncWidgetSnapshot: true)
+                refreshScheduleCloudSyncIfNeeded(trigger: "scene_active")
                 DDLSilentRefreshCoordinator.refreshIfNeeded(trigger: "scene_active")
             }
         }
