@@ -105,7 +105,7 @@ struct AppShellView: View {
     private static let startupNoticeTitle = "1.5.3 版本更新"
     private static let startupNoticeBody = """
     1、设置页新增“清理缓存”
-    2、课表现已支持 iCloud 实时同步（实验性）
+    2、课表现已支持 iCloud 实时同步
     3、优化若干细节并修复已知问题
     """
     private static let widgetUsageGuideTitle = "非常有用的几个用法"

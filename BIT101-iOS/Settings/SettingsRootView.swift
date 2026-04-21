@@ -540,7 +540,6 @@ private struct CalendarSettingsPage: View {
     @State private var isShowingEmptyScheduleExportConfirmation = false
     @State private var isShowingSharedScheduleImportGuide = false
     @State private var isShowingLiveActivityExperimentalWarning = false
-    @State private var isShowingICloudSyncExperimentalWarning = false
     @State private var shouldOpenImportSheetAfterGuide = false
     @State private var exportedScheduleCode: ExportedScheduleCode?
     @State private var importDraft: ScheduleImportDraft?
@@ -556,14 +555,10 @@ private struct CalendarSettingsPage: View {
                 LabeledContent("当前学期", value: viewModel.cache.currentTerm.isEmpty ? "未设置" : viewModel.cache.currentTerm)
                 LabeledContent("学期起始日期", value: viewModel.firstDayDescription)
 
-                Toggle("iCloud 实时同步（实验性）", isOn: Binding(
+                Toggle("iCloud 实时同步", isOn: Binding(
                     get: { viewModel.cache.iCloudSyncEnabled },
                     set: { enabled in
-                        if enabled {
-                            isShowingICloudSyncExperimentalWarning = true
-                        } else {
-                            viewModel.setICloudSyncEnabled(false)
-                        }
+                        viewModel.setICloudSyncEnabled(enabled)
                     }
                 ))
 
@@ -747,14 +742,6 @@ private struct CalendarSettingsPage: View {
         } message: {
             Text("开发者和 AI 尚未完全摸清楚灵动岛的运作机理和唤醒条件。虽然做了多重兜底，但仍不能保证每节课都能按时通知。继续打开视为已知悉此风险。")
         }
-        .alert("实验性功能提醒", isPresented: $isShowingICloudSyncExperimentalWarning) {
-            Button("取消", role: .cancel) {}
-            Button("继续打开") {
-                viewModel.setICloudSyncEnabled(true)
-            }
-        } message: {
-            Text("iCloud 实时同步目前仍属实验性功能。首次开启后会尝试把当前账号的课表、考试、DDL、自定义课程、分享课表和显示偏好同步到你的 iCloud 私有数据库；如果多设备同时修改，可能短时间内出现延迟或覆盖。")
-        }
         .alert("导入分享课表提示", isPresented: $isShowingSharedScheduleImportGuide) {
             Button("知道了") {
                 appSettings.markSharedScheduleImportGuideSeen()
@@ -819,25 +806,28 @@ private struct CalendarSettingsPage: View {
 
     /// 解析并导入一份压缩编码的课表。
     ///
-    /// 当前支持的格式为：
-    /// `BIT101SCH1:<base64(lzfse(json(payload)))>`
+    /// 当前支持两套格式：
+    /// - `BIT101SCH1:<base64(lzfse(json(payload))))>`：V1 完整 JSON 载荷
+    /// - `BIT101SCH2:<base64(lzfse(json(compactPayload))))>`：V2 精简数组载荷
+    ///
+    /// UI 保持不变，只在导入端根据版本前缀切换解析器。
     private func importScheduleCode(_ text: String) throws {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw NSError(domain: "BIT101.ScheduleImport", code: -1, userInfo: [NSLocalizedDescriptionKey: "请输入或粘贴课表编码。"])
         }
 
-        let prefix = "BIT101SCH1:"
-        if !trimmed.hasPrefix(prefix),
+        let supportedPrefixes = ["BIT101SCH1:", "BIT101SCH2:"]
+        if !supportedPrefixes.contains(where: { trimmed.hasPrefix($0) }),
            let colonIndex = trimmed.firstIndex(of: ":"),
            trimmed.hasPrefix("BIT101SCH") {
             let versionToken = trimmed[trimmed.index(trimmed.startIndex, offsetBy: "BIT101SCH".count) ..< colonIndex]
-            if let version = Int(versionToken), version > 1 {
+            if let version = Int(versionToken), version > 2 {
                 throw NSError(domain: "BIT101.ScheduleImport", code: -1, userInfo: [NSLocalizedDescriptionKey: "对方版本更高，请更新版本后再导入。"])
             }
         }
 
-        guard trimmed.hasPrefix(prefix) else {
+        guard let prefix = supportedPrefixes.first(where: { trimmed.hasPrefix($0) }) else {
             throw NSError(domain: "BIT101.ScheduleImport", code: -1, userInfo: [NSLocalizedDescriptionKey: "课表编码格式不正确。"])
         }
 
@@ -852,7 +842,16 @@ private struct CalendarSettingsPage: View {
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        let payload = try decoder.decode(ScheduleExportPayload.self, from: jsonData)
+        let payload: ScheduleExportPayload
+        switch prefix {
+        case "BIT101SCH1:":
+            payload = try decoder.decode(ScheduleExportPayload.self, from: jsonData)
+        case "BIT101SCH2:":
+            let compactPayload = try decoder.decode(ScheduleExportCompactPayloadV2.self, from: jsonData)
+            payload = compactPayload.expandedPayload(using: viewModel.cache)
+        default:
+            throw NSError(domain: "BIT101.ScheduleImport", code: -1, userInfo: [NSLocalizedDescriptionKey: "课表编码格式不正确。"])
+        }
         try viewModel.importSharedSchedule(payload)
         viewModel.notice = ScheduleNotice(title: "导入成功", message: "分享的课表已导入。考试、DDL 与自定义日程不会随导入覆盖。")
     }
