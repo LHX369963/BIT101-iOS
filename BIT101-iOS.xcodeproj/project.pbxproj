@@ -26,7 +26,7 @@
 		C0683505889D51D1ED727339 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F8E44554F89A8994A3C6A41E /* Assets.xcassets */; };
 		C8618324F1CB0A8EB9CB55F9 /* BIT101ScheduleWidgetBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66582305EDF75198F3070B6C /* BIT101ScheduleWidgetBundle.swift */; };
 		CDDB7CC9D6C32483E0E54C0E /* BIT101WatchExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = E8DFA667ABC75C6810BC0A6B /* BIT101WatchExtension.appex */; };
-		D6E1110C49C701CB6C8B3080 /* BIT101Watch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 027903073181F16453D11398 /* BIT101Watch.app */; };
+		D6E1110C49C701CB6C8B3080 /* BIT101Watch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 027903073181F16453D11398 /* BIT101Watch.app */; platformFilter = ios; };
 		E89B1AAE46D4FFA1A056C483 /* ScheduleSharedLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CF4896F51E6C19BBE15048C /* ScheduleSharedLiveActivity.swift */; };
 		E8DF51F6326A8FA9797F82E9 /* BIT101WatchWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 6C427FABBA6FB6C2CF4098BE /* BIT101WatchWidgets.appex */; };
 		F52E9C051CAF65D91825FB7A /* WatchScheduleRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A6C2ACF3AF5C705FD407FBA /* WatchScheduleRootView.swift */; };
@@ -79,7 +79,7 @@
 		7DE3E2E83612E965A2BA07B0 /* Embed Watch Content */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
-			dstPath = Watch;
+			dstPath = "$(WATCH_CONTENT_DESTINATION)";
 			dstSubfolderSpec = 1;
 			files = (
 				D6E1110C49C701CB6C8B3080 /* BIT101Watch.app in Embed Watch Content */,
@@ -855,6 +855,8 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
+				WATCH_CONTENT_DESTINATION = Watch;
+				"WATCH_CONTENT_DESTINATION[sdk=macosx*]" = "Contents/Watch";
 			};
 			name = Debug;
 		};
@@ -889,6 +891,8 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
+				WATCH_CONTENT_DESTINATION = Watch;
+				"WATCH_CONTENT_DESTINATION[sdk=macosx*]" = "Contents/Watch";
 			};
 			name = Release;
 		};
