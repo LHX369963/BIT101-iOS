@@ -20,10 +20,12 @@ private func makeHorizontalSwitchGesture(onStep: @escaping (Int) -> Void) -> som
 
 /// 成绩页本地筛选偏好快照。
 ///
-/// 按账号保存上一次的学期与课程性质筛选，避免每次重进页面都重新全选。
+/// 按账号保存上一次的学期、课程性质筛选与排序偏好，避免每次重进页面都重新配置。
 private struct ScoreFilterPreferenceSnapshot: Codable {
     var selectedTerms: [String] = []
     var selectedCourseTypes: [String] = []
+    var sortIndex: String?
+    var sortOrder: String?
 }
 
 /// 成绩筛选偏好的本地仓库。
@@ -35,10 +37,17 @@ private enum ScoreFilterPreferenceStore {
         return try? JSONDecoder().decode(ScoreFilterPreferenceSnapshot.self, from: data)
     }
 
-    static func save(selectedTerms: Set<String>, selectedCourseTypes: Set<String>) {
+    static func save(
+        selectedTerms: Set<String>,
+        selectedCourseTypes: Set<String>,
+        sortIndex: ScoreSortIndex,
+        sortOrder: ScoreSortOrder
+    ) {
         let snapshot = ScoreFilterPreferenceSnapshot(
             selectedTerms: Array(selectedTerms),
-            selectedCourseTypes: Array(selectedCourseTypes)
+            selectedCourseTypes: Array(selectedCourseTypes),
+            sortIndex: sortIndex.rawValue,
+            sortOrder: sortOrder.rawValue
         )
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
@@ -51,11 +60,148 @@ private enum ScoreFilterPreferenceStore {
     }
 }
 
+/// 成绩列表支持的排序索引。
+private enum ScoreSortIndex: String, CaseIterable, Identifiable {
+    case courseName
+    case score
+    case averageScore
+    case credit
+    case term
+    case courseType
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .courseName:
+            return "名称"
+        case .score:
+            return "成绩"
+        case .averageScore:
+            return "均分"
+        case .credit:
+            return "学分"
+        case .term:
+            return "学期"
+        case .courseType:
+            return "种类"
+        }
+    }
+
+    /// 当前索引对应字段是否为空。空字段统一排到最后，避免缺失值在降序时顶到列表最前。
+    func isMissingValue(in row: ScoreRow) -> Bool {
+        switch self {
+        case .courseName:
+            return normalizedText(row.courseName).isEmpty
+        case .score:
+            return scoreComparableValue(from: row.score) == nil
+        case .averageScore:
+            return numericComparableValue(from: row.averageScore) == nil
+        case .credit:
+            return numericComparableValue(from: row.creditText) == nil
+        case .term:
+            return normalizedText(row.term).isEmpty
+        case .courseType:
+            return normalizedText(row.courseType).isEmpty
+        }
+    }
+
+    /// 比较两条成绩在当前排序索引上的值。
+    func compare(_ lhs: ScoreRow, _ rhs: ScoreRow) -> ComparisonResult {
+        switch self {
+        case .courseName:
+            return normalizedText(lhs.courseName).localizedStandardCompare(normalizedText(rhs.courseName))
+        case .score:
+            return compareNumbers(scoreComparableValue(from: lhs.score), scoreComparableValue(from: rhs.score))
+        case .averageScore:
+            return compareNumbers(numericComparableValue(from: lhs.averageScore), numericComparableValue(from: rhs.averageScore))
+        case .credit:
+            return compareNumbers(numericComparableValue(from: lhs.creditText), numericComparableValue(from: rhs.creditText))
+        case .term:
+            return normalizedText(lhs.term).localizedStandardCompare(normalizedText(rhs.term))
+        case .courseType:
+            return normalizedText(lhs.courseType).localizedStandardCompare(normalizedText(rhs.courseType))
+        }
+    }
+
+    private func normalizedText(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func numericComparableValue(from raw: String) -> Double? {
+        let trimmed = normalizedText(raw)
+        guard !trimmed.isEmpty else { return nil }
+        return Double(trimmed)
+    }
+
+    private func scoreComparableValue(from raw: String) -> Double? {
+        let trimmed = normalizedText(raw)
+        guard !trimmed.isEmpty else { return nil }
+
+        switch trimmed {
+        case "优秀":
+            return 95
+        case "良好":
+            return 85
+        case "中等":
+            return 75
+        case "及格":
+            return 65
+        case "不及格":
+            return 0
+        default:
+            return Double(trimmed)
+        }
+    }
+
+    private func compareNumbers(_ lhs: Double?, _ rhs: Double?) -> ComparisonResult {
+        guard let lhs, let rhs else { return .orderedSame }
+        if lhs < rhs { return .orderedAscending }
+        if lhs > rhs { return .orderedDescending }
+        return .orderedSame
+    }
+}
+
+/// 成绩列表排序方向。
+private enum ScoreSortOrder: String, CaseIterable, Identifiable {
+    case ascending
+    case descending
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .ascending:
+            return "升序"
+        case .descending:
+            return "降序"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .ascending:
+            return "arrow.up"
+        case .descending:
+            return "arrow.down"
+        }
+    }
+
+    var toggled: ScoreSortOrder {
+        switch self {
+        case .ascending:
+            return .descending
+        case .descending:
+            return .ascending
+        }
+    }
+}
+
 /// 原生成绩页状态机。
 ///
 /// 固定以复杂模式查询成绩，并负责筛选同步、统计汇总以及错误提示。
 @MainActor
-final class ScoreViewModel: ObservableObject {
+private final class ScoreViewModel: ObservableObject {
     /// 全量成绩数据。
     @Published private(set) var rows: [ScoreRow] = []
     /// 页面加载状态。
@@ -68,6 +214,10 @@ final class ScoreViewModel: ObservableObject {
     @Published private(set) var selectedTerms: Set<String> = []
     /// 当前选中的课程性质集合。
     @Published private(set) var selectedCourseTypes: Set<String> = []
+    /// 当前成绩列表排序索引。
+    @Published private(set) var sortIndex: ScoreSortIndex = .courseName
+    /// 当前成绩列表排序方向。
+    @Published private(set) var sortOrder: ScoreSortOrder = .ascending
     @Published var alert: LoginAlert?
 
     private let service: ScoreService
@@ -79,6 +229,18 @@ final class ScoreViewModel: ObservableObject {
 
     init(service: ScoreService) {
         self.service = service
+        if
+            let rawSortIndex = preferenceSnapshot?.sortIndex,
+            let persistedSortIndex = ScoreSortIndex(rawValue: rawSortIndex)
+        {
+            sortIndex = persistedSortIndex
+        }
+        if
+            let rawSortOrder = preferenceSnapshot?.sortOrder,
+            let persistedSortOrder = ScoreSortOrder(rawValue: rawSortOrder)
+        {
+            sortOrder = persistedSortOrder
+        }
     }
 
     convenience init() {
@@ -147,9 +309,42 @@ final class ScoreViewModel: ObservableObject {
         }
     }
 
+    /// 当前筛选与排序条件下实际展示的成绩。
+    var visibleRows: [ScoreRow] {
+        let rowsForDisplay = filteredRows
+
+        return rowsForDisplay.enumerated()
+            .sorted { lhs, rhs in
+                let lhsMissingValue = sortIndex.isMissingValue(in: lhs.element)
+                let rhsMissingValue = sortIndex.isMissingValue(in: rhs.element)
+
+                if lhsMissingValue != rhsMissingValue {
+                    return !lhsMissingValue
+                }
+
+                let comparison = sortIndex.compare(lhs.element, rhs.element)
+                if comparison == .orderedSame {
+                    return lhs.offset < rhs.offset
+                }
+
+                switch sortOrder {
+                case .ascending:
+                    return comparison == .orderedAscending
+                case .descending:
+                    return comparison == .orderedDescending
+                }
+            }
+            .map(\.element)
+    }
+
     /// 当前筛选结果对应的统计摘要。
     var summary: ScoreSummary {
         ScoreSummary.make(from: filteredRows)
+    }
+
+    /// 当前排序偏好的人类可读摘要。
+    var sortDescription: String {
+        return "\(sortIndex.title) · \(sortOrder.title)"
     }
 
     /// 替换学期筛选结果，并自动剔除已不存在的选项。
@@ -175,6 +370,24 @@ final class ScoreViewModel: ObservableObject {
     func toggleAllCourseTypes() {
         let allCourseTypes = Set(availableCourseTypes)
         selectedCourseTypes = selectedCourseTypes == allCourseTypes ? [] : allCourseTypes
+        persistFilterPreferences()
+    }
+
+    /// 设置成绩列表排序索引。
+    func setSortIndex(_ value: ScoreSortIndex) {
+        sortIndex = value
+        persistFilterPreferences()
+    }
+
+    /// 设置成绩列表排序方向。
+    func setSortOrder(_ value: ScoreSortOrder) {
+        sortOrder = value
+        persistFilterPreferences()
+    }
+
+    /// 在升序和降序之间切换。
+    func toggleSortOrder() {
+        sortOrder = sortOrder.toggled
         persistFilterPreferences()
     }
 
@@ -228,7 +441,9 @@ final class ScoreViewModel: ObservableObject {
         guard didInitializeTermSelection, didInitializeCourseTypeSelection else { return }
         ScoreFilterPreferenceStore.save(
             selectedTerms: selectedTerms,
-            selectedCourseTypes: selectedCourseTypes
+            selectedCourseTypes: selectedCourseTypes,
+            sortIndex: sortIndex,
+            sortOrder: sortOrder
         )
     }
 
@@ -369,7 +584,7 @@ private struct ScoreListPage: View {
                 .background(Color(.systemGroupedBackground))
             case .loaded:
                 List {
-                    Section("筛选") {
+                    Section {
                         NavigationLink {
                             ScoreFilterPage(
                                 title: "学期筛选",
@@ -397,6 +612,22 @@ private struct ScoreListPage: View {
                         } label: {
                             LabeledContent("种类", value: selectionDescription(selected: viewModel.selectedCourseTypes, all: viewModel.availableCourseTypes))
                         }
+
+                        NavigationLink {
+                            ScoreSortPage(
+                                sortIndex: Binding(
+                                    get: { viewModel.sortIndex },
+                                    set: { viewModel.setSortIndex($0) }
+                                ),
+                                sortOrder: Binding(
+                                    get: { viewModel.sortOrder },
+                                    set: { viewModel.setSortOrder($0) }
+                                ),
+                                onToggleOrder: viewModel.toggleSortOrder
+                            )
+                        } label: {
+                            LabeledContent("排序", value: viewModel.sortDescription)
+                        }
                     }
 
                     Section("统计") {
@@ -407,7 +638,7 @@ private struct ScoreListPage: View {
                     }
 
                     Section("成绩列表") {
-                        if viewModel.filteredRows.isEmpty {
+                        if viewModel.visibleRows.isEmpty {
                             ContentUnavailableView(
                                 "暂无成绩",
                                 systemImage: "chart.bar.doc.horizontal",
@@ -415,7 +646,7 @@ private struct ScoreListPage: View {
                             )
                             .frame(maxWidth: .infinity)
                         } else {
-                            ForEach(viewModel.filteredRows) { row in
+                            ForEach(viewModel.visibleRows) { row in
                                 NavigationLink {
                                     ScoreDetailView(row: row)
                                 } label: {
@@ -777,5 +1008,56 @@ private struct ScoreFilterPage: View {
     /// 根据当前选择情况自动在“全选 / 全不选”间切换文案。
     private var toggleAllTitle: String {
         selectedValues.count == options.count ? "全不选" : "全选"
+    }
+}
+
+/// 成绩排序页。
+///
+/// 排序只影响列表展示顺序，不改变统计口径；缺失排序值的课程会固定排在最后。
+private struct ScoreSortPage: View {
+    @Binding var sortIndex: ScoreSortIndex
+    @Binding var sortOrder: ScoreSortOrder
+    let onToggleOrder: () -> Void
+
+    var body: some View {
+        List {
+            Section("排序索引") {
+                ForEach(ScoreSortIndex.allCases) { index in
+                    Button {
+                        sortIndex = index
+                    } label: {
+                        HStack {
+                            Text(index.title)
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Image(systemName: sortIndex == index ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(sortIndex == index ? Color.accentColor : .secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Section {
+                Button {
+                    onToggleOrder()
+                } label: {
+                    HStack {
+                        Label(sortOrder.title, systemImage: sortOrder.systemImage)
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Text("切换")
+                            .font(.subheadline)
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+            } header: {
+                Text("排序方向")
+            } footer: {
+                Text("升序表示小的在上，降序表示大的在上。")
+            }
+        }
+        .navigationTitle("成绩排序")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

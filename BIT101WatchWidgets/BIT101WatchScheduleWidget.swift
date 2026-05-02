@@ -122,14 +122,32 @@ private struct WatchScheduleProvider: TimelineProvider {
         )
     }
 
-    /// complication 只需要在“当前展示的下一节课开始时”刷新一次，
-    /// 让界面自动切到再下一节；没有下一节课时则定期兜底刷新。
+    /// complication 需要在“课程开始”和“日期跨天”时刷新。
+    ///
+    /// 如果昨天晚上展示“明天 8:00”，但时间线一直等到 8:00 才刷新，
+    /// 午夜到上课前这段时间就会继续显示“明天”。因此这里把下一个午夜也作为刷新点，
+    /// 让 watch 离开手机时仍能用本地镜像把“明天”修正为“今天”。
     private func nextRefreshDate(for entry: WatchScheduleEntry) -> Date {
         let now = Date()
-        if let nextStartDate = entry.nextOccurrence?.startDate, nextStartDate > now.addingTimeInterval(30) {
-            return nextStartDate
+        let fallbackRefreshDate = Calendar.current.date(byAdding: .minute, value: 30, to: now)
+            ?? now.addingTimeInterval(1800)
+        let nextMidnight = ScheduleSharedDateCodec.calendar.date(
+            byAdding: .day,
+            value: 1,
+            to: ScheduleSharedDateCodec.calendar.startOfDay(for: now)
+        )?.addingTimeInterval(1)
+
+        var refreshDates = [fallbackRefreshDate]
+
+        if let nextMidnight, nextMidnight > now.addingTimeInterval(30) {
+            refreshDates.append(nextMidnight)
         }
-        return Calendar.current.date(byAdding: .minute, value: 30, to: now) ?? now.addingTimeInterval(1800)
+
+        if let nextStartDate = entry.nextOccurrence?.startDate, nextStartDate > now.addingTimeInterval(30) {
+            refreshDates.append(nextStartDate)
+        }
+
+        return refreshDates.min() ?? fallbackRefreshDate
     }
 }
 

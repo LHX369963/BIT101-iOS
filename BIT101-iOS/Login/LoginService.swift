@@ -59,6 +59,7 @@ struct SchoolLoginContext {
 enum LoginServiceError: LocalizedError {
     case invalidSchoolLoginPage
     case schoolLoginFailed
+    case unableToRestoreSchoolSession
     case invalidServerResponse
     case keychainWriteFailed(OSStatus)
     case keychainReadFailed(OSStatus)
@@ -69,6 +70,8 @@ enum LoginServiceError: LocalizedError {
             return "学校登录页结构发生变化，暂时无法完成登录。"
         case .schoolLoginFailed:
             return "学校统一身份认证登录失败，请检查学号和密码。"
+        case .unableToRestoreSchoolSession:
+            return "学校登录状态已过期，且缺少可用于静默恢复的本地凭据。"
         case .invalidServerResponse:
             return "服务器返回了无法识别的数据。"
         case let .keychainWriteFailed(status):
@@ -769,6 +772,11 @@ struct LoginService {
     /// 校验当前本地会话是否仍然有效。
     ///
     /// 如有必要，会尝试使用已保存的账号密码静默重登学校 SSO。
+    ///
+    /// 这条检查会被启动后台校验、设置页手动检查和日程同步前置校验共同调用，
+    /// 因此清退策略必须保守：只有远端明确说明当前凭据已经无效时才清掉本地 session。
+    /// 网络不稳、学校登录页结构异常、缺少静默恢复材料等情况只向上抛错，不删除
+    /// `fake-cookie`，避免把一次临时故障扩散成主 App / watch / widget 全部退出登录。
     func checkLogin() async throws -> String? {
         let fakeCookie = storage.fakeCookie
         guard !fakeCookie.isEmpty else {
@@ -786,19 +794,24 @@ struct LoginService {
         if schoolContext.isLoggedIn {
             let studentID = storage.currentStudentID
             if studentID.isEmpty {
-                storage.clearSession()
-                return nil
+                throw LoginServiceError.unableToRestoreSchoolSession
             }
             return studentID
         }
 
         guard
-            let credentials = try storage.loadCredentials(),
-            let salt = schoolContext.salt,
-            let execution = schoolContext.execution
+            let credentials = try storage.loadCredentials()
         else {
-            storage.clearSession()
-            return nil
+            throw LoginServiceError.unableToRestoreSchoolSession
+        }
+
+        guard
+            let salt = schoolContext.salt?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !salt.isEmpty,
+            let execution = schoolContext.execution?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !execution.isEmpty
+        else {
+            throw LoginServiceError.invalidSchoolLoginPage
         }
 
         let reloginSucceeded = try await apiClient.loginSchool(

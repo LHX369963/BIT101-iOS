@@ -37,28 +37,54 @@ enum WatchScheduleRefreshState: Equatable {
 final class WatchScheduleStatusModel: ObservableObject {
     /// 主页面最多展示的后续课节数量，避免长列表在手表上无限拉长。
     private static let maxVisibleOccurrences = 50
+    private static let foregroundRefreshInterval: TimeInterval = 60
 
     @Published private(set) var snapshot: ScheduleExternalSnapshot?
     @Published private(set) var nextOccurrence: ScheduleExternalOccurrence?
     @Published private(set) var upcomingOccurrences: [ScheduleExternalOccurrence] = []
     @Published private(set) var refreshState: WatchScheduleRefreshState = .idle
+    @Published private(set) var referenceDate = Date()
 
     private var refreshFeedbackTask: Task<Void, Never>?
+    private var foregroundRefreshTask: Task<Void, Never>?
+
+    deinit {
+        refreshFeedbackTask?.cancel()
+        foregroundRefreshTask?.cancel()
+    }
 
     /// 激活同步链路，并尝试立刻拿到最新课表。
     func activate() {
         WatchScheduleSyncManager.shared.activateIfNeeded()
+        reload()
+        startForegroundRefresh()
         #if os(watchOS)
         WatchScheduleSyncManager.shared.requestLatestSnapshotFromPhone()
         #endif
-        reload()
+    }
+
+    /// watch App 从后台回到前台时，本地时间可能已经跨天或跨过上课/下课边界。
+    ///
+    /// 这里不依赖 iPhone 重新推送；即使手机不在身边，也会基于 watch 本地镜像重新计算
+    /// “今天 / 明天”和当前/下一节状态。
+    func handleScenePhase(_ phase: ScenePhase) {
+        switch phase {
+        case .active:
+            reload()
+            startForegroundRefresh()
+        case .inactive, .background:
+            stopForegroundRefresh()
+        @unknown default:
+            break
+        }
     }
 
     /// 仅从本地镜像重载当前页面。
     ///
     /// 这个方法不会主动访问网络；它只消费 iPhone 已经推送过来的共享快照。
-    func reload() {
-        let resolved = ScheduleOccurrenceResolver.loadResolvedSnapshot(limit: Self.maxVisibleOccurrences)
+    func reload(now: Date = Date()) {
+        referenceDate = now
+        let resolved = ScheduleOccurrenceResolver.loadResolvedSnapshot(now: now, limit: Self.maxVisibleOccurrences)
         self.snapshot = resolved.snapshot
         self.nextOccurrence = resolved.nextOccurrence
         self.upcomingOccurrences = resolved.upcomingOccurrences
@@ -97,10 +123,27 @@ final class WatchScheduleStatusModel: ObservableObject {
         }
     }
 
+    private func startForegroundRefresh() {
+        guard foregroundRefreshTask == nil else { return }
+        foregroundRefreshTask = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Self.foregroundRefreshInterval))
+                guard !Task.isCancelled else { return }
+                self.reload()
+            }
+        }
+    }
+
+    private func stopForegroundRefresh() {
+        foregroundRefreshTask?.cancel()
+        foregroundRefreshTask = nil
+    }
+
     /// 清空 watch 本地已缓存的课表快照。
     func clearLocalData() {
         refreshFeedbackTask?.cancel()
         refreshState = .idle
+        referenceDate = Date()
         ScheduleExternalSnapshotStore.clear()
         self.snapshot = nil
         self.nextOccurrence = nil
@@ -157,13 +200,13 @@ struct WatchScheduleRootView: View {
                 LazyVStack(alignment: .leading) {
                     VStack(alignment: .leading) {
                         HStack(alignment: .firstTextBaseline) {
-                            Text(next.isCurrent() ? "正在上课" : "下一节")
+                            Text(next.isCurrent(at: model.referenceDate) ? "正在上课" : "下一节")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
                             Spacer(minLength: 0)
 
-                            Text(next.relativeDayText())
+                            Text(next.relativeDayText(referenceDate: model.referenceDate))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -194,7 +237,7 @@ struct WatchScheduleRootView: View {
                         ForEach(Array(model.upcomingOccurrences.dropFirst())) { occurrence in
                             VStack(alignment: .leading) {
                                 HStack(alignment: .firstTextBaseline) {
-                                    Text(occurrence.relativeDayText())
+                                    Text(occurrence.relativeDayText(referenceDate: model.referenceDate))
                                         .font(.caption2.weight(.medium))
                                         .foregroundStyle(.secondary)
 

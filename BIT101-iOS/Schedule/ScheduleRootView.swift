@@ -1336,6 +1336,9 @@ private struct DDLScheduleTabView: View {
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
+            Color(.systemGroupedBackground)
+                .ignoresSafeArea(edges: .bottom)
+
             Group {
                 if !viewModel.hasLexueCalendarURL {
                     VStack(spacing: 16) {
@@ -1383,10 +1386,6 @@ private struct DDLScheduleTabView: View {
                         }
                     }
                     .listStyle(.insetGrouped)
-                    .safeAreaInset(edge: .bottom) {
-                        Color.clear
-                            .frame(height: 112)
-                    }
                 }
             }
 
