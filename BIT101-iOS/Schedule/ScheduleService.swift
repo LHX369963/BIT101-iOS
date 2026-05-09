@@ -50,6 +50,16 @@ private final class ScheduleNoRedirectDelegate: NSObject, URLSessionTaskDelegate
     }
 }
 
+/// 统一识别 Swift Concurrency 与 URLSession 的取消错误。
+private func isCancellationError(_ error: Error) -> Bool {
+    if error is CancellationError {
+        return true
+    }
+
+    let nsError = error as NSError
+    return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+}
+
 /// 日程同步链路里所有 URL 的升级工具。
 private enum ScheduleURLUpgrade {
     /// 尝试把单个 URL 升级成 HTTPS。
@@ -223,6 +233,10 @@ private final class JXZXWebVPNClient {
             try await ensureWdkbPrepared()
             return try await sendJSONRequest(path: path, method: method, body: body)
         } catch {
+            if isCancellationError(error) {
+                throw error
+            }
+
             resetAuthorizationState(clearCookies: true)
             try await ensureJXZXAuthorized()
             try await ensureWdkbPrepared()
@@ -451,6 +465,10 @@ private final class JXZXWebVPNClient {
         do {
             (data, response) = try await activeSession.data(for: finalRequest)
         } catch {
+            if isCancellationError(error) {
+                throw error
+            }
+
             throw webVPNError(error.localizedDescription)
         }
 
@@ -630,6 +648,10 @@ struct ScheduleService {
             try await prepareJXZX()
             return try await fetchCurrentTerm()
         } catch {
+            if isCancellationError(error) {
+                throw error
+            }
+
             return try await webVPNClient.fetchCurrentTerm()
         }
     }
@@ -674,6 +696,10 @@ struct ScheduleService {
             try await prepareJXZX()
             return try await fetchCampusesDirect()
         } catch {
+            if isCancellationError(error) {
+                throw error
+            }
+
             return try await webVPNClient.fetchCampuses()
         }
     }
@@ -687,6 +713,10 @@ struct ScheduleService {
             try await prepareJXZX()
             return try await fetchBuildingsDirect(campusCode: campusCode)
         } catch {
+            if isCancellationError(error) {
+                throw error
+            }
+
             return try await webVPNClient.fetchBuildings(campusCode: campusCode)
         }
     }
@@ -700,16 +730,30 @@ struct ScheduleService {
             try await prepareJXZX()
             return try await fetchClassroomsDirect(buildingID: buildingID, term: term)
         } catch {
+            if isCancellationError(error) {
+                throw error
+            }
+
             return try await webVPNClient.fetchClassrooms(buildingID: buildingID, term: term)
         }
     }
 
     /// 确保学校侧登录态仍然有效。
     ///
-    /// 日程模块大量依赖学校接口，因此在真正请求前先复用 `LoginService.checkLogin()` 做兜底校验。
+    /// 日程模块大量依赖学校接口，但登录状态检查本身只是前置探测，不应该成为课表 / DDL / 空教室
+    /// 真实业务请求之前的额外失败弹窗来源。
+    ///
+    /// 因此这里仅在远端明确判断当前会话无效时阻断；网络抖动、学校登录页异常等“检查失败”
+    /// 会静默放行，让后续业务请求或 WebVPN fallback 自己给出更贴近场景的错误。
     private func ensureSchoolSession() async throws {
-        guard try await LoginService().checkLogin() != nil else {
-            throw ScheduleServiceError.notLoggedIn
+        do {
+            guard try await LoginService().checkLogin() != nil else {
+                throw ScheduleServiceError.notLoggedIn
+            }
+        } catch let error as ScheduleServiceError {
+            throw error
+        } catch {
+            return
         }
     }
 

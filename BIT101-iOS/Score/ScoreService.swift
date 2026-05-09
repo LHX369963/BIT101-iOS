@@ -6,6 +6,7 @@ import Foundation
 enum ScoreServiceError: LocalizedError {
     case missingCredentials
     case invalidResponse
+    case requestTimedOut
     case queryFailed(String)
 
     var errorDescription: String? {
@@ -14,6 +15,8 @@ enum ScoreServiceError: LocalizedError {
             return "未找到已保存的学号和密码，请先重新登录。"
         case .invalidResponse:
             return "成绩服务返回了无法识别的数据。"
+        case .requestTimedOut:
+            return "请求超时，请稍后重试。"
         case let .queryFailed(message):
             return message
         }
@@ -43,6 +46,8 @@ struct ScoreService {
 
     private let storage: LoginStorage
     private let session: URLSession
+    /// 成绩查询的单次请求超时时间。
+    private static let requestTimeoutSeconds: TimeInterval = 15
     /// 成绩代理服务基地址。
     ///
     /// 默认走线上代理；如 `Info.plist` 提供了覆写地址，则优先使用覆写值。
@@ -53,7 +58,10 @@ struct ScoreService {
     /// 这里不复用主站 fake-cookie，而是直接读取已保存的学号和统一认证密码去请求成绩代理。
     init(storage: LoginStorage = .shared) {
         self.storage = storage
-        self.session = URLSession(configuration: .default)
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = Self.requestTimeoutSeconds
+        configuration.timeoutIntervalForResource = Self.requestTimeoutSeconds
+        self.session = URLSession(configuration: configuration)
 
         if
             let configured = Bundle.main.object(forInfoDictionaryKey: "BIT101BitLoginURL") as? String,
@@ -78,6 +86,7 @@ struct ScoreService {
         }
 
         var request = URLRequest(url: endpointBaseURL.appending(path: "api/jwb/bit101/score"))
+        request.timeoutInterval = Self.requestTimeoutSeconds
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(
@@ -88,7 +97,13 @@ struct ScoreService {
             )
         )
 
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch let error as URLError where error.code == .timedOut {
+            throw ScoreServiceError.requestTimedOut
+        }
         guard let httpResponse = response as? HTTPURLResponse else {
             throw ScoreServiceError.invalidResponse
         }

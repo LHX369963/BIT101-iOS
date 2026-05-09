@@ -1610,47 +1610,46 @@ private struct DDLEditSheet: View {
 /// 交互上尽量保持“选校区 -> 自动拉默认楼 -> 再选楼”的顺序，减少无效点击。
 private struct FreeClassroomTabView: View {
     @ObservedObject var viewModel: ScheduleViewModel
+    @State private var isManuallyRefreshing = false
 
     var body: some View {
         List {
-            Section("筛选") {
-                if viewModel.isLoadingClassroomMeta && viewModel.campuses.isEmpty {
+            if viewModel.shouldShowInitialClassroomSpinner && !isManuallyRefreshing {
+                Section {
                     HStack {
                         Spacer()
-                        VStack(spacing: 12) {
-                            ProgressView()
-                            Text("正在加载校区与教学楼…")
-                                .foregroundStyle(.secondary)
-                        }
+                        ProgressView()
                         Spacer()
                     }
-                    .frame(maxWidth: .infinity, minHeight: 160)
-                    .alignmentGuide(.listRowSeparatorLeading) { _ in 0 }
-                } else {
-                    Picker("校区", selection: Binding(
-                        get: { viewModel.cache.selectedCampusCode },
-                        set: { newValue in
-                            Task {
-                                await viewModel.selectCampus(code: newValue)
-                            }
-                        }
-                    )) {
-                        ForEach(viewModel.campuses) { campus in
-                            Text(campus.name).tag(campus.code)
+                    .frame(maxWidth: .infinity)
+                    .listRowBackground(Color.clear)
+                }
+            }
+
+            Section("筛选") {
+                Picker("校区", selection: Binding(
+                    get: { viewModel.cache.selectedCampusCode },
+                    set: { newValue in
+                        Task {
+                            await viewModel.selectCampus(code: newValue)
                         }
                     }
+                )) {
+                    ForEach(viewModel.campuses) { campus in
+                        Text(campus.name).tag(campus.code)
+                    }
+                }
 
-                    Picker("教学楼", selection: Binding(
-                        get: { viewModel.selectedBuildingID },
-                        set: { newValue in
-                            Task {
-                                await viewModel.selectBuilding(id: newValue)
-                            }
+                Picker("教学楼", selection: Binding(
+                    get: { viewModel.selectedBuildingID },
+                    set: { newValue in
+                        Task {
+                            await viewModel.selectBuilding(id: newValue)
                         }
-                    )) {
-                        ForEach(viewModel.buildings) { building in
-                            Text(building.name).tag(building.buildingCode)
-                        }
+                    }
+                )) {
+                    ForEach(viewModel.buildings) { building in
+                        Text(building.name).tag(building.buildingCode)
                     }
                 }
 
@@ -1669,21 +1668,12 @@ private struct FreeClassroomTabView: View {
 
             if viewModel.classroomAvailabilities.isEmpty {
                 Section {
-                    if viewModel.isLoadingClassrooms {
-                        VStack(spacing: 12) {
-                            ProgressView()
-                            Text("正在加载教室状态…")
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 180, alignment: .center)
-                    } else {
-                        ContentUnavailableView(
-                            "暂无空教室结果",
-                            systemImage: "building.2.crop.circle",
-                            description: Text("先选定校区和教学楼，再刷新一次。")
-                        )
-                        .frame(maxWidth: .infinity)
-                    }
+                    ContentUnavailableView(
+                        "暂无空教室结果",
+                        systemImage: "building.2.crop.circle",
+                        description: Text("先选定校区和教学楼，再刷新一次。")
+                    )
+                    .frame(maxWidth: .infinity)
                 }
             } else {
                 Section {
@@ -1705,6 +1695,10 @@ private struct FreeClassroomTabView: View {
         }
         .listStyle(.insetGrouped)
         .refreshable {
+            isManuallyRefreshing = true
+            defer {
+                isManuallyRefreshing = false
+            }
             await viewModel.refreshClassroomPage()
         }
     }
