@@ -172,8 +172,10 @@ private struct CourseScheduleTabView: View {
     @State private var selectedEntry: ScheduleCalendarEntry?
     @State private var editingCustomScheduleID: String?
     @State private var editingCourseID: String?
+    @State private var selectedDayAdjustmentContext: ScheduleDayAdjustmentContext?
     @State private var customScheduleDraft = CustomScheduleDraft()
     @State private var courseDraft = CourseDraft()
+    @State private var dayAdjustmentDraft = ScheduleDayAdjustmentDraft()
     @State private var isShowingEditSchedule = false
     @State private var isShowingCourseEditor = false
     @State private var courseEditorMode: CourseEditorMode = .add
@@ -207,6 +209,23 @@ private struct CourseScheduleTabView: View {
                             showBorder: viewModel.cache.showBorder,
                             onSelect: { entry in
                                 selectedEntry = entry
+                            },
+                            onSelectDay: { date, weekday in
+                                guard supportsEditingDisplayedSchedule else {
+                                    viewModel.notice = ScheduleNotice(
+                                        title: "无法调整分享课表",
+                                        message: "分享课表是只读副本。调休 / 放假只支持当前账号自己的课表，不会修改导入的分享课表。"
+                                    )
+                                    return
+                                }
+                                selectedDayAdjustmentContext = ScheduleDayAdjustmentContext(
+                                    date: date,
+                                    week: viewModel.selectedWeek,
+                                    weekday: weekday
+                                )
+                                dayAdjustmentDraft = ScheduleDayAdjustmentDraft(
+                                    targetDate: Calendar.current.date(byAdding: .day, value: 1, to: date) ?? date
+                                )
                             }
                         )
                         .padding(.horizontal, 12)
@@ -378,6 +397,32 @@ private struct CourseScheduleTabView: View {
                 }
             )
         }
+        .sheet(item: $selectedDayAdjustmentContext) { context in
+            DayAdjustmentSheet(
+                context: context,
+                draft: $dayAdjustmentDraft,
+                onSubmit: {
+                    do {
+                        switch dayAdjustmentDraft.mode {
+                        case .holiday:
+                            viewModel.clearCourses(week: context.week, weekday: context.weekday)
+                        case .transfer:
+                            try viewModel.transferCourses(
+                                fromWeek: context.week,
+                                fromWeekday: context.weekday,
+                                to: dayAdjustmentDraft.targetDate
+                            )
+                        }
+                        selectedDayAdjustmentContext = nil
+                    } catch {
+                        viewModel.notice = ScheduleNotice(title: "保存失败", message: error.localizedDescription)
+                    }
+                },
+                onDismiss: {
+                    selectedDayAdjustmentContext = nil
+                }
+            )
+        }
         .sheet(item: $settingsRoute) { route in
             NavigationStack {
                 SettingsRootView(initialRoute: route, studentID: "", onLogout: {}, showsCloseButton: true)
@@ -399,6 +444,7 @@ private struct CourseScheduleTabView: View {
         isShowingCourseEditor = false
         editingCustomScheduleID = nil
         editingCourseID = nil
+        selectedDayAdjustmentContext = nil
     }
 
     /// 课表之间的上下滑循环切换。
@@ -567,6 +613,162 @@ private enum CourseEditorMode: Equatable {
     }
 }
 
+/// 点击课表顶部日期后进入的日期调整上下文。
+private struct ScheduleDayAdjustmentContext: Identifiable {
+    private static let shortDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+        formatter.dateFormat = "M.d"
+        return formatter
+    }()
+
+    let date: Date
+    let week: Int
+    let weekday: Int
+
+    var id: String {
+        "\(week)-\(weekday)-\(ScheduleDateCodec.formatDate(date))"
+    }
+
+    var shortTitle: String {
+        "\(weekdayText) \(Self.shortDateFormatter.string(from: date))"
+    }
+
+    var fullDateText: String {
+        "\(ScheduleDateCodec.formatDate(date))（\(weekdayText)）"
+    }
+
+    private var weekdayText: String {
+        let titles = ["一", "二", "三", "四", "五", "六", "日"]
+        guard (1 ... titles.count).contains(weekday) else { return "?" }
+        return "周\(titles[weekday - 1])"
+    }
+}
+
+/// 单日课表调整模式。
+private enum ScheduleDayAdjustmentMode: String, CaseIterable, Identifiable {
+    case holiday
+    case transfer
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .holiday:
+            return "放假"
+        case .transfer:
+            return "调至某天"
+        }
+    }
+}
+
+/// 单日课表调整草稿。
+private struct ScheduleDayAdjustmentDraft: Equatable {
+    var mode: ScheduleDayAdjustmentMode = .holiday
+    var targetDate = Date()
+}
+
+/// 放假 / 调休调整页。
+private struct DayAdjustmentSheet: View {
+    let context: ScheduleDayAdjustmentContext
+    @Binding var draft: ScheduleDayAdjustmentDraft
+    let onSubmit: () -> Void
+    let onDismiss: () -> Void
+
+    @State private var pendingConfirmation: PendingDayAdjustmentConfirmation?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("日期") {
+                    LabeledContent("当前日期", value: context.fullDateText)
+                    LabeledContent("当前周次", value: "第\(context.week)周")
+                }
+
+                Section("操作") {
+                    Picker("类型", selection: $draft.mode) {
+                        ForEach(ScheduleDayAdjustmentMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    if draft.mode == .transfer {
+                        DatePicker("调至", selection: $draft.targetDate, displayedComponents: .date)
+                    }
+                }
+
+                Section {
+                    Text(footerText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("调休 / 放假")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消", action: onDismiss)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("确定") {
+                        pendingConfirmation = PendingDayAdjustmentConfirmation(
+                            mode: draft.mode,
+                            sourceDateText: context.fullDateText,
+                            targetDateText: ScheduleDateCodec.formatDate(draft.targetDate)
+                        )
+                    }
+                }
+            }
+            .alert(item: $pendingConfirmation) { confirmation in
+                Alert(
+                    title: Text(confirmation.title),
+                    message: Text(confirmation.message),
+                    primaryButton: .destructive(Text("确定")) {
+                        onSubmit()
+                    },
+                    secondaryButton: .cancel(Text("取消"))
+                )
+            }
+        }
+    }
+
+    private var footerText: String {
+        switch draft.mode {
+        case .holiday:
+            return "放假会清空这一天的课程；考试和自定义日程不会被删除。"
+        case .transfer:
+            return "调课会先清空当前日期的课程，再把这些课程移动到目标日期；如果目标日期已有课程，将被覆盖。"
+        }
+    }
+
+    private struct PendingDayAdjustmentConfirmation: Identifiable {
+        let id = UUID()
+        let mode: ScheduleDayAdjustmentMode
+        let sourceDateText: String
+        let targetDateText: String
+
+        var title: String {
+            switch mode {
+            case .holiday:
+                return "确认放假"
+            case .transfer:
+                return "确认调课"
+            }
+        }
+
+        var message: String {
+            switch mode {
+            case .holiday:
+                return "这会清空 \(sourceDateText) 的课程。"
+            case .transfer:
+                return "这会清空 \(sourceDateText) 的课程，并调至 \(targetDateText)。如果目标日期已有课程，将被覆盖。"
+            }
+        }
+    }
+}
+
 /// 周课表大网格。
 ///
 /// 这里是一个完全自绘的课表网格，而不是 `LazyVGrid` 套组件，原因是：
@@ -595,6 +797,7 @@ private struct CourseScheduleCalendarView: View {
     let showCurrentTime: Bool
     let showBorder: Bool
     let onSelect: (ScheduleCalendarEntry) -> Void
+    let onSelectDay: (Date, Int) -> Void
 
     var body: some View {
         GeometryReader { proxy in
@@ -634,14 +837,19 @@ private struct CourseScheduleCalendarView: View {
                         .background(Color(.secondarySystemBackground))
 
                         ForEach(Array(weekDates.enumerated()), id: \.offset) { index, date in
-                            VStack(spacing: 2) {
-                                Text(weekdayText(for: visibleWeekdays[index]))
-                                Text(mmddText(for: date))
+                            Button {
+                                onSelectDay(date, visibleWeekdays[index])
+                            } label: {
+                                VStack(spacing: 2) {
+                                    Text(weekdayText(for: visibleWeekdays[index]))
+                                    Text(mmddText(for: date))
+                                }
+                                .font(.caption2)
+                                .foregroundStyle(.primary)
+                                .frame(width: dayWidth, height: headerHeight)
+                                .background(Color(.secondarySystemBackground))
                             }
-                            .font(.caption2)
-                            .foregroundStyle(.primary)
-                            .frame(width: dayWidth, height: headerHeight)
-                            .background(Color(.secondarySystemBackground))
+                            .buttonStyle(.plain)
                         }
                     }
 
@@ -918,6 +1126,14 @@ private struct ScheduleEntryDetailSheet: View {
                         Button("删除这门课", role: .destructive) {
                             pendingCourseDeletion = .wholeCourse
                         }
+                    }
+                }
+
+                if entry.kind == .course, !allowsCourseMutation {
+                    Section("编辑") {
+                        Text("分享课表是只读副本，不能调课、删除课程或做调休 / 放假。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
                 }
 

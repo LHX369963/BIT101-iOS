@@ -11,7 +11,7 @@ struct BIT101WatchExtensionApp: App {
                 .task {
                     model.activate()
                 }
-                .onChange(of: scenePhase) { phase in
+                .onChange(of: scenePhase) { _, phase in
                     model.handleScenePhase(phase)
                 }
         }

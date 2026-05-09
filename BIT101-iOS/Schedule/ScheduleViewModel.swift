@@ -781,6 +781,52 @@ final class ScheduleViewModel: ObservableObject {
         persist()
     }
 
+    /// 将指定日期设置为放假：只清空这一天的课程，不影响考试和自定义日程。
+    func clearCourses(week: Int, weekday: Int) {
+        cache.courses = coursesRemovingOccurrences(from: cache.courses, week: week, weekday: weekday)
+        persist()
+    }
+
+    /// 将某一天的课程调至目标日期。
+    ///
+    /// 调课语义：
+    /// - 原日期课程会被清空。
+    /// - 目标日期已有课程会被覆盖。
+    /// - 只移动课程，不移动考试和自定义日程。
+    func transferCourses(fromWeek: Int, fromWeekday: Int, to targetDate: Date) throws {
+        let target = try courseDayContext(for: targetDate)
+        let sourceCourses = cache.courses.filter { course in
+            course.weekday == fromWeekday && course.weeks.contains(fromWeek)
+        }
+
+        var nextCourses = coursesRemovingOccurrences(from: cache.courses, week: fromWeek, weekday: fromWeekday)
+        nextCourses = coursesRemovingOccurrences(from: nextCourses, week: target.week, weekday: target.weekday)
+        nextCourses.append(contentsOf: sourceCourses.map { course in
+            CourseRecord(
+                id: UUID().uuidString,
+                term: course.term,
+                name: course.name,
+                teacher: course.teacher,
+                classroom: course.classroom,
+                description: course.description,
+                weeks: [target.week],
+                weekday: target.weekday,
+                startSection: course.startSection,
+                endSection: course.endSection,
+                campus: course.campus,
+                number: course.number,
+                credit: course.credit,
+                hour: course.hour,
+                type: course.type,
+                category: course.category,
+                department: course.department
+            )
+        })
+
+        cache.courses = nextCourses
+        persist()
+    }
+
     /// 导入一份分享的课表载荷。
     ///
     /// 导入后的课表会作为一份“只读分身”追加到当前账号本地缓存中，
@@ -865,6 +911,55 @@ final class ScheduleViewModel: ObservableObject {
     func deleteCustomSchedule(id: String) {
         cache.customSchedules.removeAll { $0.id == id }
         persist()
+    }
+
+    /// 把一组课程中的某个具体周次 / 星期出现移除。
+    private func coursesRemovingOccurrences(from courses: [CourseRecord], week: Int, weekday: Int) -> [CourseRecord] {
+        courses.compactMap { course in
+            guard course.weekday == weekday, course.weeks.contains(week) else {
+                return course
+            }
+
+            let remainingWeeks = course.weeks.filter { $0 != week }
+            guard !remainingWeeks.isEmpty else { return nil }
+
+            return CourseRecord(
+                id: course.id,
+                term: course.term,
+                name: course.name,
+                teacher: course.teacher,
+                classroom: course.classroom,
+                description: course.description,
+                weeks: remainingWeeks,
+                weekday: course.weekday,
+                startSection: course.startSection,
+                endSection: course.endSection,
+                campus: course.campus,
+                number: course.number,
+                credit: course.credit,
+                hour: course.hour,
+                type: course.type,
+                category: course.category,
+                department: course.department
+            )
+        }
+    }
+
+    /// 根据日期计算它落在当前课表首周后的第几周、周几。
+    private func courseDayContext(for date: Date) throws -> (week: Int, weekday: Int) {
+        guard let firstDay = cache.firstDay else {
+            throw scheduleValidationError("当前课表缺少首周日期，无法调课。")
+        }
+
+        let calendar = Calendar.current
+        let start = calendar.startOfDay(for: firstDay)
+        let target = calendar.startOfDay(for: date)
+        let dayOffset = calendar.dateComponents([.day], from: start, to: target).day ?? 0
+        guard dayOffset >= 0 else {
+            throw scheduleValidationError("目标日期早于当前学期首周，无法调课。")
+        }
+
+        return (week: dayOffset / 7 + 1, weekday: dayOffset % 7 + 1)
     }
 
     /// 进入空教室页前的统一预热入口。

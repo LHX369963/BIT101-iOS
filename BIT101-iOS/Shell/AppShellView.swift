@@ -104,9 +104,10 @@ enum AppTab: String, Identifiable, Codable {
 struct AppShellView: View {
     private static let startupNoticeTitle = "1.5.3 版本更新"
     private static let startupNoticeBody = """
-    1、设置页新增“清理缓存”
-    2、课表现已支持 iCloud 实时同步
-    3、优化若干细节并修复已知问题
+    1、课表现已支持 iCloud 实时同步。
+    2、新增调休 / 放假：点击周次右侧的日期即可清空当天课程，或将当天课程调至其它日期
+    3、成绩页新增排序能力，可按名称、成绩、均分、学分等字段升序 / 降序排列。
+    4、优化使用体验。
     """
     private static let widgetUsageGuideTitle = "非常有用的几个用法"
     private static let widgetUsageGuideBody = """

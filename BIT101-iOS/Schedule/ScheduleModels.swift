@@ -19,7 +19,7 @@ import CloudKit
 /// - 设置页里的重命名输入
 /// - 导入分享课表后的默认命名
 /// - 旧缓存恢复后的标题展示
-let scheduleNameCharacterLimit = 8
+nonisolated let scheduleNameCharacterLimit = 8
 
 /// 本地缓存发生变化时发出的通知。
 ///
@@ -56,7 +56,7 @@ enum ScheduleSection: String, CaseIterable, Identifiable {
 /// 节次与时间段的映射。
 ///
 /// `TimeSlot` 是课表、空教室、当前时间线、小组件和灵动岛共同依赖的基础模型。
-struct TimeSlot: Codable, Hashable, Identifiable {
+nonisolated struct TimeSlot: Codable, Hashable, Identifiable {
     let id: Int
     let start: String
     let end: String
@@ -275,7 +275,7 @@ struct ClassroomAvailability: Identifiable, Hashable {
 /// - 空教室偏好
 /// - 课表显示设置
 /// - 灵动岛提醒设置
-struct ScheduleCache: Codable {
+nonisolated struct ScheduleCache: Codable {
     var primaryScheduleTitle = "课表"
     var currentTerm: String = ""
     var firstDayString: String = ""
@@ -306,7 +306,7 @@ struct ScheduleCache: Codable {
 
     /// 首周日期的解码结果，便于课表直接计算当前周数。
     var firstDay: Date? {
-        ScheduleDateCodec.parseDate(firstDayString)
+        Self.parseFirstDay(firstDayString)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -388,6 +388,25 @@ struct ScheduleCache: Codable {
     /// 这里不额外做空值兜底，调用方如果需要“默认标题”，应先给出默认值再传入。
     private static func clampedScheduleTitle(_ title: String) -> String {
         String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(scheduleNameCharacterLimit))
+    }
+
+    /// 非隔离地解析 `yyyy-MM-dd`，供 `Codable` 和云同步 actor 使用。
+    ///
+    /// 这里不用 `DateFormatter`，避免默认 MainActor 隔离下在非隔离编解码路径里访问共享 formatter。
+    private static func parseFirstDay(_ string: String) -> Date? {
+        let parts = string.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3 else { return nil }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600) ?? .current
+
+        var components = DateComponents()
+        components.calendar = calendar
+        components.timeZone = calendar.timeZone
+        components.year = parts[0]
+        components.month = parts[1]
+        components.day = parts[2]
+        return calendar.date(from: components)
     }
 }
 
