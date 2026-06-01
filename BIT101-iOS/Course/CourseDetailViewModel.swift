@@ -93,6 +93,8 @@ final class CourseDetailViewModel: ObservableObject {
     @Published private(set) var status: CourseDetailLoadStatus = .idle
     @Published private(set) var isLikingCourse = false
     @Published private(set) var commentState = GalleryCommentState()
+    @Published private(set) var historyGrades: [CourseHistoryGrade] = []
+    @Published private(set) var historyGradeStatus: CourseHistoryGradeLoadStatus = .idle
     @Published private(set) var likingCommentIDs: Set<Int> = []
     @Published private(set) var isSubmittingComment = false
     @Published var alert: LoginAlert?
@@ -113,6 +115,34 @@ final class CourseDetailViewModel: ObservableObject {
 
     var resolvedNumber: String {
         course?.number ?? initialCourse.number
+    }
+
+    var resolvedCreditText: String {
+        guard let credit = course?.credit ?? initialCourse.credit ?? localScheduleCredit else {
+            return "-"
+        }
+        if credit.rounded() == credit {
+            return String(format: "%.0f", credit)
+        }
+        return String(format: "%.1f", credit)
+    }
+
+    private var localScheduleCredit: Double? {
+        let number = resolvedNumber.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = resolvedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let courses = ScheduleCacheStore.load().courses
+
+        if !number.isEmpty,
+           let course = courses.first(where: { $0.number.trimmingCharacters(in: .whitespacesAndNewlines) == number && $0.credit > 0 }) {
+            return Double(course.credit)
+        }
+
+        if !name.isEmpty,
+           let course = courses.first(where: { $0.name.trimmingCharacters(in: .whitespacesAndNewlines) == name && $0.credit > 0 }) {
+            return Double(course.credit)
+        }
+
+        return nil
     }
 
     var resolvedTeachersName: String {
@@ -139,6 +169,10 @@ final class CourseDetailViewModel: ObservableObject {
 
     var isCourseLiked: Bool {
         course?.like ?? false
+    }
+
+    var sharedMaterialsURL: URL? {
+        courseExternalURL()
     }
 
     func bootstrapIfNeeded() async {
@@ -193,6 +227,43 @@ final class CourseDetailViewModel: ObservableObject {
         case let .failure(error):
             if isCourseDetailCancellation(error) { return }
             alert = LoginAlert(title: "加载更多评论失败", message: error.localizedDescription)
+        }
+    }
+
+    func loadHistoryGradesIfNeeded() async {
+        switch historyGradeStatus {
+        case .idle, .failed:
+            break
+        case .loading, .loaded:
+            return
+        }
+        await reloadHistoryGrades()
+    }
+
+    func reloadHistoryGrades() async {
+        let number = resolvedNumber.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !number.isEmpty else {
+            historyGradeStatus = .failed("课程号为空，无法加载历史成绩。")
+            return
+        }
+
+        historyGradeStatus = .loading
+        let result = await loadResult { [self] in
+            try await self.service.fetchCourseHistories(number: number)
+        }
+
+        switch result {
+        case let .success(grades):
+            historyGrades = grades.sorted { lhs, rhs in
+                lhs.term.localizedStandardCompare(rhs.term) == .orderedDescending
+            }
+            historyGradeStatus = .loaded
+        case let .failure(error):
+            if isCourseDetailCancellation(error) {
+                historyGradeStatus = .idle
+                return
+            }
+            historyGradeStatus = .failed(error.localizedDescription)
         }
     }
 
@@ -267,6 +338,7 @@ final class CourseDetailViewModel: ObservableObject {
             id: initialCourse.id,
             name: initialCourse.name,
             number: initialCourse.number,
+            credit: initialCourse.credit,
             likeNum: likeNum,
             commentNum: initialCourse.commentNum,
             rate: initialCourse.rate,
@@ -328,6 +400,21 @@ final class CourseDetailViewModel: ObservableObject {
         commentState.isLoadingMore = false
         commentState.nextPage = 0
         commentState.canLoadMore = true
+    }
+
+    private func courseExternalURL() -> URL? {
+        let name = resolvedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let number = resolvedNumber.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !number.isEmpty else { return nil }
+
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#[]@!$&'()*+,;=")
+
+        guard let pathComponent = "\(name)-\(number)".addingPercentEncoding(withAllowedCharacters: allowed) else {
+            return nil
+        }
+
+        return URL(string: "https://onedrive.bit101.cn/zh-CN/course/\(pathComponent)")
     }
 
     private func loadResult<T>(_ operation: @escaping () async throws -> T) async -> Result<T, Error> {

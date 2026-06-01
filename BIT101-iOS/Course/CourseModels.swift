@@ -37,11 +37,38 @@ struct CourseSummary: Decodable, Identifiable, Equatable {
     let id: Int
     let name: String
     let number: String
+    let credit: Double?
     let likeNum: Int
     let commentNum: Int
     let rate: Double
     let teachersName: String
     let teachersNumber: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case number
+        case credit
+        case credits
+        case likeNum
+        case commentNum
+        case rate
+        case teachersName
+        case teachersNumber
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(Int.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        number = try container.decode(String.self, forKey: .number)
+        credit = container.decodeFlexibleDoubleIfPresent(forKeys: [.credit, .credits])
+        likeNum = try container.decode(Int.self, forKey: .likeNum)
+        commentNum = try container.decode(Int.self, forKey: .commentNum)
+        rate = try container.decode(Double.self, forKey: .rate)
+        teachersName = try container.decode(String.self, forKey: .teachersName)
+        teachersNumber = try container.decode(String.self, forKey: .teachersNumber)
+    }
 }
 
 /// 课程详情。
@@ -51,6 +78,7 @@ struct CourseDetail: Decodable, Equatable {
     let id: Int
     let name: String
     let number: String
+    let credit: Double?
     let likeNum: Int
     let commentNum: Int
     let rate: Double
@@ -58,12 +86,65 @@ struct CourseDetail: Decodable, Equatable {
     let teachersNumber: String
     let like: Bool
 
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case number
+        case credit
+        case credits
+        case likeNum
+        case commentNum
+        case rate
+        case teachersName
+        case teachersNumber
+        case like
+    }
+
+    init(
+        id: Int,
+        name: String,
+        number: String,
+        credit: Double?,
+        likeNum: Int,
+        commentNum: Int,
+        rate: Double,
+        teachersName: String,
+        teachersNumber: String,
+        like: Bool
+    ) {
+        self.id = id
+        self.name = name
+        self.number = number
+        self.credit = credit
+        self.likeNum = likeNum
+        self.commentNum = commentNum
+        self.rate = rate
+        self.teachersName = teachersName
+        self.teachersNumber = teachersNumber
+        self.like = like
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(Int.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        number = try container.decode(String.self, forKey: .number)
+        credit = container.decodeFlexibleDoubleIfPresent(forKeys: [.credit, .credits])
+        likeNum = try container.decode(Int.self, forKey: .likeNum)
+        commentNum = try container.decode(Int.self, forKey: .commentNum)
+        rate = try container.decode(Double.self, forKey: .rate)
+        teachersName = try container.decode(String.self, forKey: .teachersName)
+        teachersNumber = try container.decode(String.self, forKey: .teachersNumber)
+        like = try container.decode(Bool.self, forKey: .like)
+    }
+
     /// 返回替换点赞状态后的新课程详情。
     func updatingLike(_ like: Bool, likeNum: Int) -> CourseDetail {
         CourseDetail(
             id: id,
             name: name,
             number: number,
+            credit: credit,
             likeNum: likeNum,
             commentNum: commentNum,
             rate: rate,
@@ -71,6 +152,82 @@ struct CourseDetail: Decodable, Equatable {
             teachersNumber: teachersNumber,
             like: like
         )
+    }
+}
+
+/// 单门课程的历史成绩统计。
+///
+/// Web 端称为“历史记录”，iOS 端在详情页展示为“历史成绩”。
+struct CourseHistoryGrade: Decodable, Identifiable, Equatable {
+    let term: String
+    let avgScore: Double?
+    let maxScore: Double?
+    let studentNum: Int?
+
+    var id: String { term }
+
+    private enum CodingKeys: String, CodingKey {
+        case term
+        case avgScore
+        case maxScore
+        case studentNum
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        term = try container.decode(String.self, forKey: .term)
+        avgScore = container.decodeFlexibleDoubleIfPresent(forKeys: [.avgScore])
+        maxScore = container.decodeFlexibleDoubleIfPresent(forKeys: [.maxScore])
+        studentNum = container.decodeFlexibleIntIfPresent(forKeys: [.studentNum])
+    }
+}
+
+/// 历史成绩加载状态。
+enum CourseHistoryGradeLoadStatus: Equatable {
+    case idle
+    case loading
+    case loaded
+    case failed(String)
+}
+
+private extension KeyedDecodingContainer {
+    func decodeFlexibleDoubleIfPresent(forKeys keys: [Key]) -> Double? {
+        for key in keys {
+            if let value = try? decodeIfPresent(Double.self, forKey: key) {
+                return value
+            }
+            if let value = try? decodeIfPresent(Int.self, forKey: key) {
+                return Double(value)
+            }
+            if let value = try? decodeIfPresent(String.self, forKey: key) {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let parsed = Double(trimmed) {
+                    return parsed
+                }
+            }
+        }
+        return nil
+    }
+
+    func decodeFlexibleIntIfPresent(forKeys keys: [Key]) -> Int? {
+        for key in keys {
+            if let value = try? decodeIfPresent(Int.self, forKey: key) {
+                return value
+            }
+            if let value = try? decodeIfPresent(Double.self, forKey: key) {
+                return Int(value)
+            }
+            if let value = try? decodeIfPresent(String.self, forKey: key) {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let parsed = Int(trimmed) {
+                    return parsed
+                }
+                if let parsed = Double(trimmed) {
+                    return Int(parsed)
+                }
+            }
+        }
+        return nil
     }
 }
 

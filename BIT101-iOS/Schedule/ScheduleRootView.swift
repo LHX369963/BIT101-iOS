@@ -489,8 +489,8 @@ private struct CourseScheduleTabView: View {
                     detailLines: [
                         $0.teacher.isEmpty ? nil : "教师：\($0.teacher)",
                         $0.classroom.isEmpty ? nil : "教室：\(normalizeDisplayedClassroom($0.classroom))",
+                        "学分：\($0.credit > 0 ? String($0.credit) : "-")",
                         "节次：\($0.sectionText)",
-                        "时间：\($0.timeText(using: activeSchedule.timeTable))",
                         $0.description.isEmpty ? nil : $0.description,
                     ].compactMap { $0 },
                     kind: .course

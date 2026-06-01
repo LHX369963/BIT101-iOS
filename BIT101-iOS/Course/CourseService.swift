@@ -87,6 +87,11 @@ struct CourseService {
         try await sendJSONRequest(path: "courses/\(id)")
     }
 
+    /// 拉取单门课程按学期聚合的历史成绩统计。
+    func fetchCourseHistories(number: String) async throws -> [CourseHistoryGrade] {
+        try await sendJSONRequest(path: "courses/histories/\(number)")
+    }
+
     /// 拉取课程评论。
     ///
     /// 课程页当前评论量较小，不再提供排序切换，因此固定拉取“最新”顺序。

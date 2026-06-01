@@ -102,12 +102,12 @@ enum AppTab: String, Identifiable, Codable {
 ///
 /// 壳层只关心两件事：按照设置中心决定展示哪些 tab，以及把退出登录回调继续往下传。
 struct AppShellView: View {
-    private static let startupNoticeTitle = "1.5.3 版本更新"
+    private static let startupNoticeTitle = "1.5.4 版本更新"
     private static let startupNoticeBody = """
-    1、课表现已支持 iCloud 实时同步。
-    2、新增调休 / 放假：点击周次右侧的日期即可清空当天课程，或将当天课程调至其它日期
-    3、成绩页新增排序能力，可按名称、成绩、均分、学分等字段升序 / 降序排列。
-    4、优化使用体验。
+    1、课程详情新增共享资料与历史成绩。
+    2、历史成绩支持趋势图、补考学期智能屏蔽。
+    3、日程课程详情补充学分信息。
+    4、优化若干细节。
     """
     private static let widgetUsageGuideTitle = "非常有用的几个用法"
     private static let widgetUsageGuideBody = """
