@@ -297,8 +297,6 @@ private struct CourseHistoryGradesSheet: View {
 
                             Section {
                                 Toggle("智能屏蔽补考学期", isOn: $hidesMakeupOutliers)
-                            } footer: {
-                                Text("开启后，图表会自动排除学习人数低于上四分位数一半的疑似补考学期；下方原始列表仍完整保留。")
                             }
 
                             Section {
